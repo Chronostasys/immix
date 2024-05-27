@@ -32,7 +32,7 @@ fn main() {
         let dst = target_dir;
         // copy all files in src to dst
         fs::create_dir_all(dst).unwrap();
-        for entry in fs::read_dir(&src).unwrap() {
+        for entry in fs::read_dir(src).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
             if path.is_dir() {
