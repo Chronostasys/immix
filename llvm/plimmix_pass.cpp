@@ -78,6 +78,9 @@ namespace
 #elif defined(__x86_64__)
             SPAsm = InlineAsm::get(FunctionType::get(PointerType::get(M->getContext(), 0), false),
                                    "mov %rsp, $0", "=r", true, InlineAsm::AsmDialect::AD_ATT);
+#elif defined(_WIN64)
+            SPAsm = InlineAsm::get(FunctionType::get(PointerType::get(M->getContext(), 0), false),
+                                   "mov %rsp, $0", "=r", true, InlineAsm::AsmDialect::AD_ATT);
 #else
 #error "Unsupported architecture"
 #endif
