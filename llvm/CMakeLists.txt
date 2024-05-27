@@ -27,7 +27,6 @@ endif()
 set(SOURCES
   memory_manager.cpp
   pljit.cpp
-  plimmix_pass.cpp
   plimmix.cpp
   plimmixprinter.cpp
 )
