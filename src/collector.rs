@@ -22,7 +22,7 @@ use crate::{
     gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, ENABLE_EVA, FREE_SPACE_DIVISOR,
     GC_AUTOCOLLECT_ENABLE, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING,
     GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK,
-    REMAIN_MULTIPLIER, SHRINK_PROPORTION, THRESHOLD_PROPORTION, USED_SPACE_DIVISOR,
+    REMAIN_MULTIPLIER, SHOULD_EXIT, SHRINK_PROPORTION, THRESHOLD_PROPORTION, USED_SPACE_DIVISOR,
     USE_SHADOW_STACK,
 };
 
@@ -1086,6 +1086,9 @@ impl Collector {
                 // voluntarily start a new gc
                 let mut first = true;
                 loop {
+                    if SHOULD_EXIT.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let mut mutex = STUCK_MUTEX.lock();
                     if first {
                         first = false;

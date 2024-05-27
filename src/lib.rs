@@ -376,6 +376,8 @@ pub(crate) static USE_SHADOW_STACK: AtomicBool = AtomicBool::new(false);
 
 pub static ENABLE_EVA: AtomicBool = AtomicBool::new(true);
 
+pub static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+
 #[cfg(feature = "auto_gc")]
 static GC_AUTOCOLLECT_ENABLE: AtomicBool = AtomicBool::new(true);
 #[cfg(not(feature = "auto_gc"))]
@@ -394,4 +396,10 @@ pub fn set_shadow_stack(b: bool) {
 #[cfg(feature = "llvm_gc_plugin")]
 pub unsafe fn set_shadow_stack_addr(addr: *mut u8) {
     shadow_stack::SetShadowStackAddr(addr)
+}
+
+pub fn exit_block() {
+    SHOULD_EXIT.store(true, Ordering::SeqCst);
+    let mut v = GC_COLLECTOR_COUNT.lock();
+    GC_MARK_COND.wait_while(&mut v, |(c, _)| *c == 0);
 }

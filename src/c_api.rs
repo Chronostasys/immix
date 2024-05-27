@@ -158,3 +158,8 @@ pub unsafe extern "C" fn DioGC__safepoint(sp: *mut u8) {
 pub unsafe extern "C" fn DioGC__about() {
     DioGC::about()
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn gc_exit_block() {
+    crate::exit_block()
+}

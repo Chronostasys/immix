@@ -247,6 +247,9 @@ extern "C"
     auto f = ExitOnErr(jit->lookup("main"));
     auto m = f.getAddress().toPtr<mainf>();
     auto ret = m();
+    auto exitf_r = ExitOnErr(jit->lookup("gc_exit_block"));
+    auto exitf = exitf_r.getAddress().toPtr<void (*)()>();
+    exitf();
     return ret;
 
   }
