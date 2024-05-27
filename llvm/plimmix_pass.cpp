@@ -96,6 +96,12 @@ namespace
             // CI->eraseFromParent();
             CIS.push_back(CI);
           }
+
+          // remove all free calls
+          if (Callee && Callee->getName() == "free")
+          {
+            CIS.push_back(CI);
+          }
         }
       }
     }
@@ -445,7 +451,6 @@ llvmGetPassPluginInfo()
       LLVM_PLUGIN_API_VERSION, "PLImmix", "v0.1",
       [](PassBuilder &PB)
       {
-        printf("registering pass\n");
         PB.registerPipelineParsingCallback(
           [](StringRef Name, FunctionPassManager &FPM,
               ArrayRef<PassBuilder::PipelineElement>)

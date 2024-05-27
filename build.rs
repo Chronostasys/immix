@@ -3,18 +3,49 @@
 extern crate lazy_static;
 
 fn main() {
-    #[cfg(all(feature = "llvm_stackmap", feature = "llvm_gc_plugin"))]
+    #[cfg(feature = "llvm_gc_plugin_lib")]
     {
+        use std::fs;
         println!("cargo:rerun-if-changed=build.rs");
         println!("cargo:rerun-if-changed=llvm/plimmixprinter.cpp");
         println!("cargo:rerun-if-changed=llvm/plimmix.cpp");
         println!("cargo:rerun-if-changed=llvm/plimmix_pass.cpp");
         println!("cargo:rerun-if-changed=llvm/memory_manager.cpp");
+        println!("cargo:rerun-if-changed=llvm/pljit.cpp");
         println!("cargo:rerun-if-changed=llvm/CMakeLists.txt");
         let dst = cmake::Config::new("llvm").static_crt(true).build();
         println!("cargo:rustc-link-search=native={}/build", dst.display());
         println!("cargo:rustc-link-lib=static=plimmix_plugin");
 
+        // output plugin binaries to /target/{debug,release}
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        let target_dir = std::path::Path::new(&out_dir)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        // Copy the plugin binaries to the target directory
+        let src = dst.join("build");
+        let dst = target_dir;
+        // copy all files in src to dst
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(&src).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let dst = dst.join(file_name);
+            fs::copy(&path, &dst).unwrap();
+        }
+    }
+
+    #[cfg(all(feature = "llvm_stackmap", feature = "llvm_gc_plugin"))]
+    {
         extern crate regex;
         extern crate semver;
 
