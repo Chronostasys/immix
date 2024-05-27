@@ -1,77 +1,131 @@
-// Program to print binary tree in 2D
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
+
 #define COUNT 10
 
-// A binary tree node
-struct Node {
+struct Node
+{
 	int data;
 	struct Node *left, *right;
 };
 
-// Helper function to allocates a new node
-struct Node* newNode(int data)
+struct Node *newNode(int data)
 {
-	struct Node* node
-		= (struct Node*)malloc(sizeof(struct Node));
+	struct Node *node = (struct Node *)malloc(sizeof(struct Node));
 	node->data = data;
 	node->left = node->right = NULL;
 	return node;
 }
 
-// Function to print binary tree in 2D
-// It does reverse inorder traversal
-void print2DUtil(struct Node* root, int space)
+struct Node *insertNode(struct Node *node, int data)
 {
-	// Base case
+	if (node == NULL)
+		return newNode(data);
+
+	if (data < node->data)
+		node->left = insertNode(node->left, data);
+	else if (data > node->data)
+		node->right = insertNode(node->right, data);
+
+	return node;
+}
+
+struct Node *minValueNode(struct Node *node)
+{
+	struct Node *current = node;
+
+	while (current && current->left != NULL)
+		current = current->left;
+
+	return current;
+}
+
+struct Node *deleteNode(struct Node *root, int data)
+{
+	if (root == NULL)
+		return root;
+
+	if (data < root->data)
+		root->left = deleteNode(root->left, data);
+	else if (data > root->data)
+		root->right = deleteNode(root->right, data);
+	else
+	{
+		if (root->left == NULL)
+		{
+			struct Node *temp = root->right;
+			free(root);
+			return temp;
+		}
+		else if (root->right == NULL)
+		{
+			struct Node *temp = root->left;
+			free(root);
+			return temp;
+		}
+
+		struct Node *temp = minValueNode(root->right);
+
+		root->data = temp->data;
+
+		root->right = deleteNode(root->right, temp->data);
+	}
+	return root;
+}
+
+void print2DUtil(struct Node *root, int space)
+{
 	if (root == NULL)
 		return;
 
-	// Increase distance between levels
 	space += COUNT;
 
-	// Process right child first
 	print2DUtil(root->right, space);
 
-	// Print current node after space
-	// count
 	printf("\n");
 	for (int i = COUNT; i < space; i++)
 		printf(" ");
 	printf("%d\n", root->data);
 
-	// Process left child
 	print2DUtil(root->left, space);
 }
 
-// Wrapper over print2DUtil()
-void print2D(struct Node* root)
+void print2D(struct Node *root)
 {
-	// Pass initial space count as 0
 	print2DUtil(root, 0);
 }
 
-// Driver program to test above functions
 int main()
 {
-	struct Node* root = newNode(1);
-	root->left = newNode(2);
-	root->right = newNode(3);
+	struct Node *root = NULL;
+	root = insertNode(root, 50);
+	root = insertNode(root, 30);
+	root = insertNode(root, 20);
+	root = insertNode(root, 40);
+	root = insertNode(root, 70);
+	root = insertNode(root, 60);
+	root = insertNode(root, 80);
 
-	root->left->left = newNode(4);
-	root->left->right = newNode(5);
-	root->right->left = newNode(6);
-	root->right->right = newNode(7);
+	print2D(root);
 
-	root->left->left->left = newNode(8);
-	root->left->left->right = newNode(9);
-	root->left->right->left = newNode(10);
-	root->left->right->right = newNode(11);
-	root->right->left->left = newNode(12);
-	root->right->left->right = newNode(13);
-	root->right->right->left = newNode(14);
-	root->right->right->right = newNode(15);
+	printf("\nDelete 20\n");
+	root = deleteNode(root, 20);
+	print2D(root);
 
+	printf("\nInsert 25\n");
+	root = insertNode(root, 25); // New insertion
+	print2D(root);
+
+	printf("\nDelete 30\n");
+	root = deleteNode(root, 30);
+	print2D(root);
+
+	printf("\nInsert 35\n");
+	root = insertNode(root, 35); // New insertion
+	print2D(root);
+
+	printf("\nDelete 50\n");
+	root = deleteNode(root, 50);
 	print2D(root);
 
 	return 0;
