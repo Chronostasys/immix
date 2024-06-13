@@ -57,7 +57,7 @@ namespace
     for (BasicBlock &BB : F)
     {
       for (Instruction &I : BB)
-      { 
+      {
         if (CallInst *CI = dyn_cast<CallInst>(&I))
         {
           Function *Callee = CI->getCalledFunction();
@@ -159,167 +159,174 @@ namespace
   {
     IRBuilder<> builder(M.getContext());
 
-    std::vector<CallInst *> mallocs;
-    std::vector<PHINode *> phis;
-    std::vector<AllocaInst *> allocas;
-    std::vector<GetElementPtrInst *> geps;
-    std::vector<MemSetInst *> memsets;
-
-    // find all gc atomic type allocations, analysis to get non-escaped set.
-    for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
+    bool changed = true;
+    int count = 0;
+    while (changed)
     {
-      Function *FV = &*FB;
-      if (!FV->getName().ends_with("visitorf@") && !FV->getName().starts_with("llvm") && !FV->isDeclaration())
+
+      changed = false;
+      std::vector<CallInst *> mallocs;
+      std::vector<PHINode *> phis;
+      std::vector<AllocaInst *> allocas;
+      std::vector<GetElementPtrInst *> geps;
+      std::vector<MemSetInst *> memsets;
+      // find all gc atomic type allocations, analysis to get non-escaped set.
+      for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
       {
-        // doing escape analysis
-        for (auto &BB : *FV)
+        Function *FV = &*FB;
+        if (!FV->getName().ends_with("visitorf@") && !FV->getName().starts_with("llvm") && !FV->isDeclaration())
         {
-          for (auto &I : BB)
+          // doing escape analysis
+          for (auto &BB : *FV)
           {
-            // if it's a call instruction and has pl_ordinary attribute
-            if (auto *call = dyn_cast<CallInst>(&I))
+            for (auto &I : BB)
             {
-              if (auto *F = call->getCalledFunction())
+              // if it's a call instruction and has pl_ordinary attribute
+              if (auto *call = dyn_cast<CallInst>(&I))
               {
-                auto attrs = call->getAttributes();
-                if (!attrs.hasRetAttr("pl_ordinary"))
+                if (auto *F = call->getCalledFunction())
                 {
-                  continue;
-                }
-                if (!F->getName().equals("DioGC__malloc"))
-                {
-                  continue;
-                }
-
-                if (!PointerMayBeCaptured(call, true, true))
-                {
-
-                  auto info = attrs.getRetAttrs().getAttribute("pl_ordinary").getValueAsString();
-                  if (info.size() > 0 && this->escaped)
+                  auto attrs = call->getAttributes();
+                  if (!attrs.hasRetAttr("pl_ordinary"))
                   {
-                    printf("variable moved to stack: %s\n", info.str().c_str());
+                    continue;
                   }
-
-                  // if the pointer may be captured, then we change this gc malloc
-                  // to stack alloca
-
-                  // the first argument of gc malloc is the size
-                  auto *size = call->getArgOperand(0);
-
-                  if (!isa<ConstantInt>(size) || !detail::isPresent(size))
+                  if (!F->getName().equals("DioGC__malloc"))
                   {
-                    // if the size is not a constant, we can't replace it with alloca
                     continue;
                   }
 
-                  // size is a number, get it's value
-                  auto *sizeValue = dyn_cast<ConstantInt>(size);
-                  auto sizeInt = sizeValue->getZExtValue();
-                  // get the size value
-
-                  // replace it with alloca
-                  builder.SetInsertPoint(&FV->front().front());
-                  auto &alloca = *builder.CreateAlloca(ArrayType::get(IntegerType::get(M.getContext(), 8), sizeInt));
-                  alloca.setAlignment(llvm::Align(8));
-                  // find all gep, replace address space with 0
-                  auto users = call->users();
-                  replace_geps(users, builder, &alloca, geps);
-
-                  // find all memset, regenrate memset
-                  auto users1 = call->users();
-                  for (auto *U : users1)
+                  if (!PointerMayBeCaptured(call, true, true))
                   {
-                    if (auto *memset = dyn_cast<MemSetInst>(U))
+
+                    auto info = attrs.getRetAttrs().getAttribute("pl_ordinary").getValueAsString();
+                    if (info.size() > 0 && this->escaped)
                     {
-                      auto *dest = memset->getDest();
-                      auto *len = memset->getLength();
-                      auto *value = memset->getValue();
-                      builder.SetInsertPoint(memset);
-                      auto *newmemset = builder.CreateMemSet(&alloca, value, len, memset->getDestAlign(), memset->isVolatile());
-                      memset->replaceAllUsesWith(newmemset);
-                      memsets.push_back(memset);
+                      printf("variable moved to stack: %s\n", info.str().c_str());
                     }
+
+                    // if the pointer may be captured, then we change this gc malloc
+                    // to stack alloca
+
+                    // the first argument of gc malloc is the size
+                    auto *size = call->getArgOperand(0);
+
+                    if (!isa<ConstantInt>(size) || !detail::isPresent(size))
+                    {
+                      // if the size is not a constant, we can't replace it with alloca
+                      continue;
+                    }
+
+                    // size is a number, get it's value
+                    auto *sizeValue = dyn_cast<ConstantInt>(size);
+                    auto sizeInt = sizeValue->getZExtValue();
+                    // get the size value
+
+                    // replace it with alloca
+                    builder.SetInsertPoint(&FV->front().front());
+                    auto &alloca = *builder.CreateAlloca(ArrayType::get(IntegerType::get(M.getContext(), 8), sizeInt));
+                    alloca.setAlignment(llvm::Align(8));
+                    // find all gep, replace address space with 0
+                    auto users = call->users();
+                    replace_geps(users, builder, &alloca, geps);
+
+                    // find all memset, regenrate memset
+                    auto users1 = call->users();
+                    for (auto *U : users1)
+                    {
+                      if (auto *memset = dyn_cast<MemSetInst>(U))
+                      {
+                        auto *dest = memset->getDest();
+                        auto *len = memset->getLength();
+                        auto *value = memset->getValue();
+                        builder.SetInsertPoint(memset);
+                        auto *newmemset = builder.CreateMemSet(&alloca, value, len, memset->getDestAlign(), memset->isVolatile());
+                        memset->replaceAllUsesWith(newmemset);
+                        memsets.push_back(memset);
+                      }
+                    }
+
+                    call->replaceAllUsesWith(&alloca);
+                    allocas.push_back(&alloca);
+
+                    mallocs.push_back(call);
+                    changed = true;
                   }
-
-                  call->replaceAllUsesWith(&alloca);
-                  allocas.push_back(&alloca);
-
-                  mallocs.push_back(call);
                 }
               }
             }
           }
         }
       }
-    }
 
-    // There's a special case where `replaceAllUsesWith` won't cover:
-    // Some LLVM pass would generate phi node, which may contians
-    // non-escaped values. `replaceAllUsesWith` won't replace value after phi,
-    // so we need to manually correct it.
-    //
-    // As phi is generated by pass, we can assume that the input values
-    // must have same escape state.
-    for (auto *alloca : allocas)
-    {
-      // correect phi
-      auto uses = alloca->uses();
-      while (true)
+      // There's a special case where `replaceAllUsesWith` won't cover:
+      // Some LLVM pass would generate phi node, which may contians
+      // non-escaped values. `replaceAllUsesWith` won't replace value after phi,
+      // so we need to manually correct it.
+      //
+      // As phi is generated by pass, we can assume that the input values
+      // must have same escape state.
+      for (auto *alloca : allocas)
       {
-        auto noMorePhi = true;
-        for (auto &U : uses)
+        // correect phi
+        auto uses = alloca->uses();
+        while (true)
         {
-
-          auto *user = U.getUser();
-          // if it's phi
-          if (auto *phi = dyn_cast<PHINode>(user))
+          auto noMorePhi = true;
+          for (auto &U : uses)
           {
-            noMorePhi = false;
-            // build a new phi which address space is 0
-            builder.SetInsertPoint(phi->getParent()->getFirstNonPHI());
-            auto newphi = builder.CreatePHI(PointerType::get(IntegerType::get(M.getContext(), 8), 0), phi->getNumIncomingValues());
-            for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
+
+            auto *user = U.getUser();
+            // if it's phi
+            if (auto *phi = dyn_cast<PHINode>(user))
             {
-              auto *incoming = phi->getIncomingValue(i);
-              auto *incomingBlock = phi->getIncomingBlock(i);
-              newphi->addIncoming(incoming, incomingBlock);
+              noMorePhi = false;
+              // build a new phi which address space is 0
+              builder.SetInsertPoint(phi->getParent()->getFirstNonPHI());
+              auto newphi = builder.CreatePHI(PointerType::get(IntegerType::get(M.getContext(), 8), 0), phi->getNumIncomingValues());
+              for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
+              {
+                auto *incoming = phi->getIncomingValue(i);
+                auto *incomingBlock = phi->getIncomingBlock(i);
+                newphi->addIncoming(incoming, incomingBlock);
+              }
+              phi->replaceAllUsesWith(newphi);
+              phis.push_back(phi);
+              // printf("replaced phi\n");
+              uses = newphi->uses();
             }
-            phi->replaceAllUsesWith(newphi);
-            phis.push_back(phi);
-            // printf("replaced phi\n");
-            uses = newphi->uses();
+          }
+          if (noMorePhi)
+          {
+            break;
           }
         }
-        if (noMorePhi)
+      }
+      // delete previous nodes.
+      for (auto *call : mallocs)
+      {
+        call->eraseFromParent();
+      }
+      for (auto *phi : phis)
+      {
+        if (phi->getParent())
         {
-          break;
+          phi->eraseFromParent();
         }
       }
-    }
-    // delete previous nodes.
-    for (auto *call : mallocs)
-    {
-      call->eraseFromParent();
-    }
-    for (auto *phi : phis)
-    {
-      if (phi->getParent())
+      for (auto *gep : geps)
       {
-        phi->eraseFromParent();
+        if (gep->getParent())
+        {
+          gep->eraseFromParent();
+        }
       }
-    }
-    for (auto *gep : geps)
-    {
-      if (gep->getParent())
+      for (auto *memset : memsets)
       {
-        gep->eraseFromParent();
-      }
-    }
-    for (auto *memset : memsets)
-    {
-      if (memset->getParent())
-      {
-        memset->eraseFromParent();
+        if (memset->getParent())
+        {
+          memset->eraseFromParent();
+        }
       }
     }
     return PreservedAnalyses::none();
@@ -455,41 +462,37 @@ llvmGetPassPluginInfo()
       [](PassBuilder &PB)
       {
         PB.registerPipelineParsingCallback(
-          [](StringRef Name, FunctionPassManager &FPM,
-              ArrayRef<PassBuilder::PipelineElement>)
-          {
-            if (Name == "replace-malloc")
+            [](StringRef Name, FunctionPassManager &FPM,
+               ArrayRef<PassBuilder::PipelineElement>)
             {
-              FPM.addPass(ReplaceMallocPass());
-              return true;
-            }
-            return false;
-          }
-        );
+              if (Name == "replace-malloc")
+              {
+                FPM.addPass(ReplaceMallocPass());
+                return true;
+              }
+              return false;
+            });
         PB.registerPipelineParsingCallback(
-          [](StringRef Name, ModulePassManager &MPM,
-              ArrayRef<PassBuilder::PipelineElement>)
-          {
-            if (Name == "plimmix")
+            [](StringRef Name, ModulePassManager &MPM,
+               ArrayRef<PassBuilder::PipelineElement>)
             {
-              MPM.addPass(ImmixPass());
-              return true;
-            }
-            return false;
-          }
-        );
-                PB.registerPipelineParsingCallback(
-          [](StringRef Name, ModulePassManager &MPM,
-              ArrayRef<PassBuilder::PipelineElement>)
-          {
-            if (Name == "pl-escape")
+              if (Name == "plimmix")
+              {
+                MPM.addPass(ImmixPass());
+                return true;
+              }
+              return false;
+            });
+        PB.registerPipelineParsingCallback(
+            [](StringRef Name, ModulePassManager &MPM,
+               ArrayRef<PassBuilder::PipelineElement>)
             {
-              MPM.addPass(EscapePass());
-              return true;
-            }
-            return false;
-          }
-        );
-      }
-    };
+              if (Name == "pl-escape")
+              {
+                MPM.addPass(EscapePass());
+                return true;
+              }
+              return false;
+            });
+      }};
 }
