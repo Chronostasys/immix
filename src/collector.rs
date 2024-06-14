@@ -438,7 +438,16 @@ impl Collector {
                     .unwrap()
                     .big_obj_from_ptr(ptr);
                 if let Some(_big_obj) = big_obj {
-                    todo!("conservative mark big obj")
+                    // scan big obj from start to end and mark all pointers
+                    // | head(16byte) | data |
+                    // |<------- size ------>|
+                    // size % 128 == 0 always, so just scan it.
+                    let mut start = (_big_obj as *mut u8).add(16);
+                    let end = start.add((*_big_obj).size - 16);
+                    while start < end {
+                        self.mark_ptr(start);
+                        start = start.add(8);
+                    }
                 }
             }
         }
