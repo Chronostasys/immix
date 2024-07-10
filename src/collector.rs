@@ -412,8 +412,8 @@ impl Collector {
                 // let mut line_header = line_header;
                 loop {
                     let ptr = block.get_nth_line(idx);
-                    for i in 0..LINE_SIZE / 8 {
-                        let p = ptr.add(i * 8);
+                    for i in 0..LINE_SIZE / 16 {
+                        let p = ptr.add(i * 16);
                         self.mark_ptr(p);
                     }
 
