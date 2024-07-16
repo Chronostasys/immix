@@ -17,21 +17,21 @@ private:
   static Expected<ThreadSafeModule>
 optimizeModule(ThreadSafeModule M, MaterializationResponsibility &R) {
   // Create a function pass manager.
-  M.withModuleDo([](Module &M) {
-    auto FPM = std::make_unique<legacy::FunctionPassManager>(&M);
+  // M.withModuleDo([](Module &M) {
+  //   auto FPM = std::make_unique<legacy::FunctionPassManager>(&M);
 
-    // Add some optimizations.
-    FPM->add(createInstructionCombiningPass());
-    FPM->add(createReassociatePass());
-    // FPM->add(createGVNPass());
-    FPM->add(createCFGSimplificationPass());
-    FPM->doInitialization();
+  //   // Add some optimizations.
+  //   FPM->add(createInstructionCombiningPass());
+  //   FPM->add(createReassociatePass());
+  //   // FPM->add(createGVNPass());
+  //   FPM->add(createCFGSimplificationPass());
+  //   FPM->doInitialization();
 
-    // Run the optimizations over all functions in the module being added to
-    // the JIT.
-    for (auto &F : M)
-      FPM->run(F);
-  });
+  //   // Run the optimizations over all functions in the module being added to
+  //   // the JIT.
+  //   for (auto &F : M)
+  //     FPM->run(F);
+  // });
 
   return M;
 }
