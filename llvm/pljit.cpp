@@ -16,14 +16,22 @@ private:
 
   static Expected<ThreadSafeModule>
 optimizeModule(ThreadSafeModule M, MaterializationResponsibility &R) {
-  // Create a function pass manager.
+  // FIXME: we should not run any pass after rs4gc pass, as doing so may break the
+  // stackmap
+  // Then how should we perform JIT optimization?
+  // Maybe everytime we can store ir before running rs4gc pass and optimize from it
+  // in the next round?
+  // Or, we write a custom pass to undo the rs4gc pass?
+
+
+  // // Create a function pass manager.
   // M.withModuleDo([](Module &M) {
   //   auto FPM = std::make_unique<legacy::FunctionPassManager>(&M);
 
   //   // Add some optimizations.
   //   FPM->add(createInstructionCombiningPass());
   //   FPM->add(createReassociatePass());
-  //   // FPM->add(createGVNPass());
+  //   FPM->add(createGVNPass());
   //   FPM->add(createCFGSimplificationPass());
   //   FPM->doInitialization();
 

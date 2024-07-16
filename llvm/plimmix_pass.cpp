@@ -225,7 +225,16 @@ namespace
                     // replace it with alloca
                     builder.SetInsertPoint(&FV->front().front());
                     auto &alloca = *builder.CreateAlloca(ArrayType::get(IntegerType::get(M.getContext(), 8), sizeInt));
-                    alloca.setAlignment(llvm::Align(16));
+                    if (sizeInt>=16)
+                    {
+                      alloca.setAlignment(llvm::Align(16));
+                    }
+                    else
+                    {
+                      alloca.setAlignment(llvm::Align(8));
+                    }
+                    
+                    
                     // find all gep, replace address space with 0
                     auto users = call->users();
                     replace_geps(users, builder, &alloca, geps);

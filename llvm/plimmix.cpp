@@ -117,11 +117,11 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
 //     FeaturesStr = getFeaturesStr();
 //     // codegen::setFunctionAttributes(CPUStr, FeaturesStr, *unwrap(M));
     TargetOptions Options = TargetOptions();
-    // Options.UnsafeFPMath = true;
-    // Options.NoNaNsFPMath = true;
-    // Options.ApproxFuncFPMath = true;
-    // Options.NoTrappingFPMath = true;
-    // Options.AllowFPOpFusion = FPOpFusion::Fast;
+    Options.UnsafeFPMath = true;
+    Options.NoNaNsFPMath = true;
+    Options.ApproxFuncFPMath = true;
+    Options.NoTrappingFPMath = true;
+    Options.AllowFPOpFusion = FPOpFusion::Fast;
 
     auto O = OptimizationLevel::O2;
 //     auto COpt = CodeGenOpt::Default;
