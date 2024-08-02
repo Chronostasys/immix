@@ -263,6 +263,7 @@ fn align_up_to(n: usize, align: usize) -> usize {
 
 #[cfg(feature = "llvm_gc_plugin")]
 extern "C" {
+    pub fn setREPL(repl: i32);
     fn LLVMLinkPLImmixGC();
     pub fn CreateAndRunPLJITEngine(
         module: *mut u8,

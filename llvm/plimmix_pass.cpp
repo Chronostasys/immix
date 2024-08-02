@@ -18,6 +18,11 @@
 using namespace llvm;
 namespace
 {
+  static bool IsREPL;
+  extern "C" void setREPL(int isREPL)
+  {
+    IsREPL = isREPL == 1;
+  }
   void immixPassLogic(Module &M);
 
   class ReplaceMallocPass : public PassInfoMixin<ReplaceMallocPass>
@@ -402,6 +407,11 @@ namespace
         FV->setGC("plimmix");
       }
     }
+    if (IsREPL)
+    {
+      return;
+    }
+    
     // auto gc_init_c = M.getOrInsertFunction("__gc_init_stackmap", Type::getVoidTy(M.getContext()));
     auto immix_init_c = M.getOrInsertFunction("immix_gc_init", Type::getVoidTy(M.getContext()), PointerType::get(IntegerType::get(M.getContext(), 8), 0));
     auto immix_init_f = cast<Function>(immix_init_c.getCallee());
