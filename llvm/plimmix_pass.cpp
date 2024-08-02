@@ -362,8 +362,8 @@ namespace
         builder.SetInsertPoint(gep);
         auto *newgep = builder.CreateGEP(gep->getSourceElementType(), ptr, arr, gep->getName(), gep->isInBounds());
         auto newusers = gep->users();
-        gep->replaceAllUsesWith(newgep);
         replace_geps(newusers, builder, newgep, geps);
+        gep->replaceAllUsesWith(newgep);
         // gep->eraseFromParent();
         geps.push_back(gep);
       }
