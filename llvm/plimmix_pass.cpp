@@ -402,32 +402,32 @@ namespace
         FV->setGC("plimmix");
       }
     }
-    if (isMain)
-    {
-      // auto gc_init_c = M.getOrInsertFunction("__gc_init_stackmap", Type::getVoidTy(M.getContext()));
-      auto immix_init_c = M.getOrInsertFunction("immix_gc_init", Type::getVoidTy(M.getContext()), PointerType::get(IntegerType::get(M.getContext(), 8), 0));
-      auto immix_init_f = cast<Function>(immix_init_c.getCallee());
-      immix_init_f->setLinkage(GlobalValue::LinkageTypes::ExternalLinkage);
-      SmallVector<Type *, 1> argTypes;
-      argTypes.push_back(PointerType::get(IntegerType::get(M.getContext(), 8), 0));
-      std::string symbol;
+    // auto gc_init_c = M.getOrInsertFunction("__gc_init_stackmap", Type::getVoidTy(M.getContext()));
+    auto immix_init_c = M.getOrInsertFunction("immix_gc_init", Type::getVoidTy(M.getContext()), PointerType::get(IntegerType::get(M.getContext(), 8), 0));
+    auto immix_init_f = cast<Function>(immix_init_c.getCallee());
+    immix_init_f->setLinkage(GlobalValue::LinkageTypes::ExternalLinkage);
+    SmallVector<Type *, 1> argTypes;
+    argTypes.push_back(PointerType::get(IntegerType::get(M.getContext(), 8), 0));
+    std::string symbol;
 // mac's symbol name has only one underscore
 #ifdef __APPLE__
-      symbol += "_LLVM_StackMaps";
+    symbol += "_LLVM_StackMaps";
 #else
-      symbol += "__LLVM_StackMaps";
+    symbol += "__LLVM_StackMaps";
 #endif
-      // symbol += M.getSourceFileName();
-      auto g = M.getOrInsertGlobal(symbol, Type::getInt8Ty(M.getContext()));
-      GlobalVariable *g_c = cast<GlobalVariable>(g);
+    // symbol += M.getSourceFileName();
+    auto g = M.getOrInsertGlobal(symbol, Type::getInt8Ty(M.getContext()));
+    GlobalVariable *g_c = cast<GlobalVariable>(g);
 
-      g_c->setLinkage(GlobalValue::LinkageTypes::ExternalLinkage);
-      g_c->setDSOLocal(true);
-      g_c->setConstant(true);
-      // g_c->setSection("__llvm_stackmaps");
-      g_c->setAlignment(llvm::Align(4));
-      // M.appendModuleInlineAsm(".globl __LLVM_StackMaps");
-      // auto g = M.getNamedGlobal(symbol);
+    g_c->setLinkage(GlobalValue::LinkageTypes::ExternalLinkage);
+    g_c->setDSOLocal(true);
+    g_c->setConstant(true);
+    // g_c->setSection("__llvm_stackmaps");
+    g_c->setAlignment(llvm::Align(4));
+    // M.appendModuleInlineAsm(".globl __LLVM_StackMaps");
+    // auto g = M.getNamedGlobal(symbol);
+    if (!M.getFunction("__gc_init_stackmap"))
+    {
       SmallVector<Value *, 1> assertArgs;
       assertArgs.push_back(g);
       Function *gc_init_f;
