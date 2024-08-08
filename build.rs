@@ -213,8 +213,7 @@ fn main() {
                 return false;
             }
 
-            let strict = env::var_os(&*ENV_STRICT_VERSIONING).is_some()
-                || cfg!(feature = "strict-versioning");
+            let strict = env::var_os(&*ENV_STRICT_VERSIONING).is_some();
             if strict {
                 llvm_version.major == CRATE_VERSION.major
                     && llvm_version.minor == CRATE_VERSION.minor
