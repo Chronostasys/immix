@@ -23,7 +23,7 @@ pub const THRESHOLD_PROPORTION: f64 = 2.0;
 /// our gc collects in two cases:
 /// - whenever OOM
 /// - when heap used memory size reached threshold
-/// 
+///
 /// You can think `threshold` as sort of `current_heap_size`,
 /// as heap memory will never overflow it.
 ///
