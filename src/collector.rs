@@ -478,7 +478,7 @@ impl Collector {
             }
             let offset_from_head = ptr.offset_from(head);
             let (line_header, idx) = block.get_line_header_from_addr(head);
-            if !is_candidate {
+            if !is_candidate || line_header.is_pinned() {
                 let block = &mut *block_p;
                 block.marked = true;
 
@@ -605,6 +605,10 @@ impl Collector {
         let len = self.live_set.borrow().len();
         self.live_set.borrow_mut().insert(len as _, gc_ptr);
         len as _
+    }
+    pub fn keep_live_pinned(&self, gc_ptr: *mut u8) -> u64 {
+        self.live_set.borrow_mut().insert(gc_ptr as _, gc_ptr);
+        gc_ptr as _
     }
     pub fn rm_live(&self, handle: u64) {
         self.live_set.borrow_mut().remove(&handle);

@@ -47,6 +47,8 @@ pub trait LineHeaderExt {
     fn get_forwarded(&self) -> bool;
     fn get_forward_start(&self) -> (bool, LineHeader);
     fn forward_cas(&mut self, old: u8) -> Result<u8, u8>;
+    fn is_pinned(&self) -> bool;
+    fn pin(&mut self);
 }
 
 /// A block is a 32KB memory region.
@@ -58,6 +60,8 @@ pub struct Block {
     /// |                           LINE HEADER(1 byte)                         |
     /// |    7   |    6   |    5   |    4   |    3   |    2   |    1   |    0   |
     /// | is head|   eva  |  evaed |        object type       | marked |  used  |
+    ///
+    /// When the evaed bit is set and eva is not, the line is pinned.
     line_map: [LineHeader; NUM_LINES_PER_BLOCK],
     /// 第一个hole的起始行号
     cursor: usize,
@@ -165,6 +169,15 @@ impl LineHeaderExt for LineHeader {
     fn get_is_used_follow(&self) -> bool {
         self & 0b10000001 == 0b00000001
     }
+
+    fn is_pinned(&self) -> bool {
+        self & 0b1100000 == 0b0100000
+    }
+
+    fn pin(&mut self) {
+        *self |= 0b100000;
+        *self &= !0b1000000;
+    }
 }
 
 impl Block {
@@ -248,8 +261,11 @@ impl Block {
         self.available_line_num = 0;
 
         while idx < NUM_LINES_PER_BLOCK {
-            self.line_map[idx] &= !0b1100000; // unset forward bits
-                                              // 未使用或者未标记
+            if !self.line_map[idx].is_pinned() {
+                // 如果pin了，需要把记号一直保留
+                self.line_map[idx] &= !0b1100000; // unset forward bits
+            }
+            // 未使用或者未标记
             if !self.line_map[idx].get_used()
                 || (self.line_map[idx] & 0b10 == 0 //即使标记位为0，也有可能是被标记的对象数据体
                     && (!marked || self.line_map[idx] & 0b10000010 == 0b10000000))

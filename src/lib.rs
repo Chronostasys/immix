@@ -200,6 +200,15 @@ pub fn gc_keep_live(gc_ptr: *mut u8) -> u64 {
     })
 }
 
+pub fn gc_keep_live_pinned(gc_ptr: *mut u8) -> u64 {
+    SPACE.with(|gc| {
+        // println!("start add_root");
+        let gc = gc.borrow();
+        gc.keep_live_pinned(gc_ptr)
+        // println!("add_root")
+    })
+}
+
 pub fn gc_rm_live(handle: u64) {
     SPACE.with(|gc| {
         // println!("start add_root");
@@ -320,6 +329,20 @@ pub fn remove_coro_stack(stack: *mut u8) {
         gc.remove_coro_stack(stack)
         // println!("add_root")
     });
+}
+
+pub unsafe fn pin(obj: *mut u8) {
+    let b = Block::from_obj_ptr(obj);
+    let head = b.get_head_ptr(obj);
+    let (lineheader, _) = b.get_line_header_from_addr(head);
+    lineheader.pin();
+}
+
+pub unsafe fn is_pinned(obj: *mut u8) -> bool {
+    let b = Block::from_obj_ptr(obj);
+    let head = b.get_head_ptr(obj);
+    let (lineheader, _) = b.get_line_header_from_addr(head);
+    lineheader.is_pinned()
 }
 
 /// # set evacuation

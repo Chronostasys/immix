@@ -110,6 +110,26 @@ pub unsafe extern "C" fn DioGC__register_global(p: *mut u8, tp: u8) {
 pub unsafe extern "C" fn DioGC__malloc(size: u64, obj_type: u8, rsp: *mut *mut u8) -> *mut u8 {
     DioGC::malloc(size, obj_type, rsp)
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn DioGC__keep_live_pinned(p: *mut u8) {
+    crate::gc_keep_live_pinned(p);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn DioGC__rm_live_pinned(p: *mut u8) {
+    crate::gc_rm_live(p as _);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn DioGC__pin(p: *mut u8) {
+    crate::pin(p);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn DioGC__is_pinned(p: *mut u8) -> i32 {
+    crate::is_pinned(p) as _
+}
 #[no_mangle]
 pub unsafe extern "C" fn DioGC__malloc_no_collect(size: u64, obj_type: u8) -> *mut u8 {
     DioGC::malloc_no_collect(size, obj_type)
