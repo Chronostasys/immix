@@ -46,6 +46,7 @@ optimizeModule(ThreadSafeModule M, MaterializationResponsibility &R) {
 
 public:
   PivotJIT(std::unique_ptr<ExecutionSession> ES,
+
                   JITTargetMachineBuilder JTMB, DataLayout DL)
       : ES(std::move(ES)), DL(std::move(DL)), Mangle(*this->ES, this->DL),
         ObjectLayer(*this->ES,
@@ -118,28 +119,33 @@ public:
   }
 };
 
-static std::string getLibvmPath() {
+
+static std::string getLibPath(char* lib) {
+    // Define the root directory for the libraries
     auto root = std::string(std::getenv("PL_ROOT"));
-    #ifdef __APPLE__
-    auto lib_path = "libvm.dylib";
-    #elif __linux__
-    auto lib_path = "libvm.so";
-    #elif _WIN32
-    auto lib_path = "vm.dll";
+
+    // Convert the char* lib to a std::string
+    std::string lib_name(lib);
+
+    // Append the appropriate library extension based on the platform
+    #if defined(_WIN32) || defined(_WIN64)
+    lib_name += ".dll";
+    #elif defined(__APPLE__)
+    lib_name = "lib" + lib_name + ".dylib";
+    #else // Assume Linux or other Unix-like system
+    lib_name = "lib" + lib_name + ".so";
     #endif
-    // join path
+
+    // Join the root and lib_name to form the full path
     std::string lib_full_path;
-    if (StringRef(root).ends_with("/"))
-    {
-      lib_full_path = root + lib_path;
+    if (StringRef(root).ends_with("/")) {
+        lib_full_path = root + lib_name;
+    } else {
+        lib_full_path = root + "/" + lib_name;
     }
-    else
-    {
-      lib_full_path = root + "/" + lib_path;
-    }
+
     return lib_full_path;
 }
-
 static ExitOnError ExitOnErr;
 static std::unique_ptr<PivotJIT> TheJIT;
 static std::map<std::string, ResourceTrackerSP> ResourceMap;
@@ -156,7 +162,7 @@ extern "C"
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
     InitializeNativeTargetAsmParser();
-    std::string lib_full_path = getLibvmPath();
+    std::string lib_full_path = getLibPath("vm");
     std::string errMsgString;
     llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_full_path.c_str(), &errMsgString);
     printf("load libvm: %s\n", errMsgString.c_str()); 
@@ -194,19 +200,27 @@ extern "C"
 
   int CreateAndRunPLOrcJITEngine(char * module_path, unsigned int opt, stackmap_cb cb)
   {
-    std::string lib_full_path = getLibvmPath();
+    std::string lib_full_path = getLibPath("vm");
+    std::string lib_uv_path = getLibPath("uv");
     
 
 
 
-    finalize_cb = cb;
+    // finalize_cb = cb;
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
     InitializeNativeTargetAsmParser();
     
-    // llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_full_path.c_str()); 
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_full_path.c_str()); 
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_uv_path.c_str()); 
     auto jit = ExitOnErr(PivotJIT::Create());
-
+    auto libuv = jit->loadPlatformDynamicLibrary(lib_uv_path.c_str());
+    if (!libuv)
+    {
+      printf("fatal: load libuv error! %s\n", lib_uv_path.c_str());
+      exit(1945);
+    }
+    jit->getMainJITDylib().addToLinkOrder(*libuv);
     auto libvm = jit->loadPlatformDynamicLibrary(lib_full_path.c_str());
     if (!libvm)
     {
@@ -267,10 +281,18 @@ extern "C"
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
     InitializeNativeTargetAsmParser();
-    std::string lib_full_path = getLibvmPath();
-    // llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_full_path.c_str()); 
+    std::string lib_full_path = getLibPath("vm");
+    std::string lib_uv_path = getLibPath("uv");
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_full_path.c_str()); 
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(lib_uv_path.c_str()); 
     auto jit = ExitOnErr(PivotJIT::Create());
-
+    auto libuv = jit->loadPlatformDynamicLibrary(lib_uv_path.c_str());
+    if (!libuv)
+    {
+      printf("fatal: load libuv error!\n");
+      exit(1945);
+    }
+    jit->getMainJITDylib().addToLinkOrder(*libuv);
     auto libvm = jit->loadPlatformDynamicLibrary(lib_full_path.c_str());
     if (!libvm)
     {
