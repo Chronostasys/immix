@@ -579,7 +579,8 @@ impl Collector {
             return;
         }
         let vptr = *(ptr as *mut *mut u8);
-        if vptr.is_null() {
+        // stack may contain old pointer that's collected before
+        if vptr.is_null() || self.thread_local_allocator.as_mut().unwrap().in_heap(vptr) {
             return;
         }
         let vtable = *(ptr as *mut VtableFunc);
