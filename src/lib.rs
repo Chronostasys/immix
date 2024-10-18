@@ -151,6 +151,27 @@ pub fn gc_malloc_no_collect(size: usize, obj_type: u8) -> *mut u8 {
     })
 }
 
+/// # gc_register_finalizer
+///
+/// Register a finalizer for an object.
+///
+/// The finalizer will be called when the object is collected.
+///
+/// ## Parameters
+///
+/// * `obj` - object pointer, must be allocated by gc. Does not need to be pinned.
+/// * `arg` - argument for the finalizer
+/// * `f` - finalizer function
+pub fn gc_register_finalizer(obj: *mut u8, arg: *mut u8, f: fn(*mut u8)) {
+    unsafe {
+        GLOBAL_ALLOCATOR
+            .0
+            .as_mut()
+            .unwrap()
+            .register_finalizer(obj, arg, f);
+    }
+}
+
 /// This function is used to force a garbage collection.
 ///
 /// During the collection mark phase, this function will

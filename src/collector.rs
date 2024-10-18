@@ -808,6 +808,32 @@ impl Collector {
         if waiting != 0 {
             GC_MARK_COND.wait_while(&mut v, |_| GC_MARKING.load(Ordering::Acquire));
         } else {
+            let g = unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap() };
+
+            let mut guard = g.finalizers.lock();
+            let mut remove_list = vec![];
+            for (i, (p, a, f)) in guard.iter_mut().enumerate() {
+                // get block of p
+                let block = unsafe { Block::from_obj_ptr(*p) };
+                let head = unsafe { block.get_head_ptr(*p) };
+                let offset_from_head = unsafe { (*p).offset_from(head) };
+                let (line_header, _) = unsafe { block.get_line_header_from_addr(head) };
+                if line_header.get_forwarded() && !line_header.is_pinned() {
+                    unsafe {
+                        _ = self.correct_ptr(p as *mut _ as _, offset_from_head, *p);
+                    }
+                } else if !line_header.get_marked() {
+                    // not marked, we should remove it
+                    remove_list.push(i);
+                    // call finalizer
+                    f(*a);
+                }
+            }
+            for i in remove_list.iter().rev() {
+                guard.swap_remove(*i);
+            }
+            drop(guard);
+
             GC_MARKING.store(false, Ordering::Release);
             GLOBAL_MARK_FLAG.store(false, Ordering::Release);
             GC_MARK_COND.notify_all();

@@ -1,11 +1,13 @@
 use std::{cell::Cell, collections::VecDeque};
 
-use parking_lot::ReentrantMutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use threadpool::ThreadPool;
 
 use crate::{bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, NUM_LINES_PER_BLOCK};
 
 use super::big_obj_allocator::BigObjAllocator;
+
+type FinalizerList = Mutex<Vec<(*mut u8, *mut u8, fn(*mut u8))>>;
 
 /// # Global allocator
 ///
@@ -45,6 +47,8 @@ pub struct GlobalAllocator {
 
     /// a bytemap indicates whether a block is in use
     block_bytemap: *mut u8,
+
+    pub(crate) finalizers: FinalizerList,
 }
 
 unsafe impl Sync for GlobalAllocator {}
@@ -91,11 +95,17 @@ impl GlobalAllocator {
             unavailable_blocks: vec![],
             recycle_blocks: vec![],
             block_bytemap,
+            finalizers: Mutex::new(Vec::new()),
         }
     }
     /// 从big object mmap中分配一个大对象，大小为size
     pub fn get_big_obj(&mut self, size: usize) -> *mut BigObj {
         self.big_obj_allocator.get_chunk(size)
+    }
+
+    pub fn register_finalizer(&self, ptr: *mut u8, arg: *mut u8, finalizer: fn(*mut u8)) {
+        let mut finalizers = self.finalizers.lock();
+        finalizers.push((ptr, arg, finalizer));
     }
 
     pub fn unmap_all(&mut self) {
