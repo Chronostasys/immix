@@ -120,6 +120,15 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
     })
 }
 
+
+pub fn print_block_time() {
+    SPACE.with(|gc| {
+        let gc = gc.borrow();
+        let duration = gc.gc_stw_duration();
+        println!("gc stw duration: {:?}", duration);
+    })
+}
+
 /// # gc_malloc_fast_unwind
 ///
 /// Same behavior as gc_malloc, but this function will use stack

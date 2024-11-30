@@ -183,3 +183,9 @@ pub unsafe extern "C" fn DioGC__about() {
 pub unsafe extern "C" fn gc_exit_block() {
     crate::exit_block()
 }
+
+
+#[no_mangle]
+pub unsafe extern "C" fn gc_print_block_time() {
+    crate::print_block_time()
+}
