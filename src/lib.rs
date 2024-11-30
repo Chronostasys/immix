@@ -36,13 +36,22 @@ use parking_lot::{Condvar, Mutex};
 #[cfg(feature = "llvm_stackmap")]
 use rustc_hash::FxHashMap;
 
-thread_local! {
-    pub static SPACE: RefCell<Collector> = unsafe {
-        // gc运行中的时候不能增加线程
-        let gc = Collector::new(GLOBAL_ALLOCATOR.0.as_mut().unwrap());
-        RefCell::new(gc)
-    };
-}
+use once_cell::sync::Lazy;
+use os_thread_local::ThreadLocal;
+
+// thread_local! {
+//     pub static SPACE: RefCell<Collector> = unsafe {
+//         // gc运行中的时候不能增加线程
+//         let gc = Collector::new(GLOBAL_ALLOCATOR.0.as_mut().unwrap());
+//         RefCell::new(gc)
+//     };
+// }
+
+pub static SPACE: Lazy<ThreadLocal< RefCell<Collector>>> = Lazy::new(|| ThreadLocal::new(|| unsafe {
+    // gc运行中的时候不能增加线程
+    let gc = Collector::new(GLOBAL_ALLOCATOR.0.as_mut().unwrap());
+    RefCell::new(gc)
+}));
 #[cfg(feature = "llvm_stackmap")]
 lazy_static! {
     static ref STACK_MAP: StackMapWrapper = {
@@ -267,7 +276,8 @@ pub fn gc_enable_auto_collect() {
 }
 
 pub fn gc_is_auto_collect_enabled() -> bool {
-    GC_AUTOCOLLECT_ENABLE.load(Ordering::SeqCst)
+    // GC_AUTOCOLLECT_ENABLE.load(Ordering::Relaxed)
+    true
 }
 
 pub fn no_gc_thread() {
@@ -295,6 +305,7 @@ pub fn gc_init(ptr: *mut u8) {
     build_root_maps(ptr, unsafe { STACK_MAP.map.as_mut().unwrap() }, unsafe {
         STACK_MAP.global_roots.as_mut().unwrap()
     });
+    eprintln!("init done {:?}", &GC_INIT_TIME.elapsed().as_nanos());
     log::info!("read stack map done");
 }
 
@@ -430,6 +441,10 @@ pub(crate) static USE_SHADOW_STACK: AtomicBool = AtomicBool::new(false);
 pub static ENABLE_EVA: AtomicBool = AtomicBool::new(true);
 
 pub static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+
+lazy_static!{
+    pub static ref GC_INIT_TIME: std::time::Instant = std::time::Instant::now();
+}
 
 #[cfg(feature = "auto_gc")]
 static GC_AUTOCOLLECT_ENABLE: AtomicBool = AtomicBool::new(true);

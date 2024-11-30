@@ -13,6 +13,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Attributes.h"
 
 #include <iostream>
 using namespace llvm;
@@ -149,20 +151,47 @@ namespace
   {
     static char ID;
     bool escaped;
+    bool check_phi;
 
   public:
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+    void correctPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, llvm::IRBuilder<> &builder, llvm::Module &M, std::__1::vector<llvm::PHINode *> &phis);
+    void hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip);
+    void replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls);
     /*
       Regenerate the gep instructions with new address space
     */
-    void replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *alloca, std::vector<llvm::GetElementPtrInst *> &geps);
+    void replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *alloca, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls);
+    bool are_phis_replacable(llvm::iterator_range<llvm::Value::use_iterator> &uses, int level);
+    bool is_replacable(llvm::Value *value);
+    bool replaceNocapturedParams(Function &F);
     EscapePass() : escaped(false) {}
-    EscapePass(bool escaped) : escaped(escaped) {}
+    EscapePass(bool escaped, bool check_phi) : escaped(escaped), check_phi(check_phi) {}
   };
 
   PreservedAnalyses EscapePass::run(Module &M, ModuleAnalysisManager &AM)
   {
     IRBuilder<> builder(M.getContext());
+
+    if (check_phi)
+    {
+      std::vector<Function *> functions;
+
+      // find all functions which parameters has metadata nocapture and "pl_ordinary"
+      for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
+      {
+        Function *FV = &*FB;
+        if (!FV->getName().ends_with("visitorf@") && !FV->getName().starts_with("llvm") && !FV->isDeclaration())
+        {
+          functions.push_back(FV);
+        }
+      }
+      for (auto *F : functions)
+      {
+        replaceNocapturedParams(*F);
+      }
+    }
+    
 
     bool changed = true;
     int count = 0;
@@ -171,6 +200,7 @@ namespace
 
       changed = false;
       std::vector<CallInst *> mallocs;
+      std::vector<llvm::CallInst *> calls;
       std::vector<PHINode *> phis;
       std::vector<AllocaInst *> allocas;
       std::vector<GetElementPtrInst *> geps;
@@ -186,6 +216,7 @@ namespace
           {
             for (auto &I : BB)
             {
+
               // if it's a call instruction and has pl_ordinary attribute
               if (auto *call = dyn_cast<CallInst>(&I))
               {
@@ -201,7 +232,7 @@ namespace
                     continue;
                   }
 
-                  if (!PointerMayBeCaptured(call, true, true))
+                  if (!PointerMayBeCaptured(call, true, false))
                   {
 
                     auto info = attrs.getRetAttrs().getAttribute("pl_ordinary").getValueAsString();
@@ -221,6 +252,21 @@ namespace
                       // if the size is not a constant, we can't replace it with alloca
                       continue;
                     }
+                    auto uses = call->uses();
+                    if (check_phi)
+                    {
+                      auto skip = false;
+                      hasPhi(uses, skip);
+                      if (skip)
+                      {
+                        continue;
+                      }
+
+                      if (!EscapePass::are_phis_replacable(uses, 0))
+                      {
+                        continue;
+                      }
+                    }
 
                     // size is a number, get it's value
                     auto *sizeValue = dyn_cast<ConstantInt>(size);
@@ -230,7 +276,7 @@ namespace
                     // replace it with alloca
                     builder.SetInsertPoint(&FV->front().front());
                     auto &alloca = *builder.CreateAlloca(ArrayType::get(IntegerType::get(M.getContext(), 8), sizeInt));
-                    if (sizeInt>=16)
+                    if (sizeInt >= 16)
                     {
                       alloca.setAlignment(llvm::Align(16));
                     }
@@ -238,29 +284,18 @@ namespace
                     {
                       alloca.setAlignment(llvm::Align(8));
                     }
-                    
-                    
+
                     // find all gep, replace address space with 0
                     auto users = call->users();
-                    replace_geps(users, builder, &alloca, geps);
-
-                    // find all memset, regenrate memset
-                    auto users1 = call->users();
-                    for (auto *U : users1)
-                    {
-                      if (auto *memset = dyn_cast<MemSetInst>(U))
-                      {
-                        auto *dest = memset->getDest();
-                        auto *len = memset->getLength();
-                        auto *value = memset->getValue();
-                        builder.SetInsertPoint(memset);
-                        auto *newmemset = builder.CreateMemSet(&alloca, value, len, memset->getDestAlign(), memset->isVolatile());
-                        memset->replaceAllUsesWith(newmemset);
-                        memsets.push_back(memset);
-                      }
-                    }
+                    replace_geps(users, builder, &alloca, geps, M, memsets, calls);
 
                     call->replaceAllUsesWith(&alloca);
+                    // find all memset, regenrate memset
+                    auto users1 = alloca.users();
+                    for (auto *U : users1)
+                    {
+                      replaceCallArgsAddrspaces(U, builder, &alloca, M, memsets, calls);
+                    }
                     allocas.push_back(&alloca);
 
                     mallocs.push_back(call);
@@ -284,37 +319,7 @@ namespace
       {
         // correect phi
         auto uses = alloca->uses();
-        while (true)
-        {
-          auto noMorePhi = true;
-          for (auto &U : uses)
-          {
-
-            auto *user = U.getUser();
-            // if it's phi
-            if (auto *phi = dyn_cast<PHINode>(user))
-            {
-              noMorePhi = false;
-              // build a new phi which address space is 0
-              builder.SetInsertPoint(phi->getParent()->getFirstNonPHI());
-              auto newphi = builder.CreatePHI(PointerType::get(IntegerType::get(M.getContext(), 8), 0), phi->getNumIncomingValues());
-              for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
-              {
-                auto *incoming = phi->getIncomingValue(i);
-                auto *incomingBlock = phi->getIncomingBlock(i);
-                newphi->addIncoming(incoming, incomingBlock);
-              }
-              phi->replaceAllUsesWith(newphi);
-              phis.push_back(phi);
-              // printf("replaced phi\n");
-              uses = newphi->uses();
-            }
-          }
-          if (noMorePhi)
-          {
-            break;
-          }
-        }
+        correctPhi(uses, builder, M, phis);
       }
       // delete previous nodes.
       for (auto *call : mallocs)
@@ -342,11 +347,153 @@ namespace
           memset->eraseFromParent();
         }
       }
+      for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
+      {
+        Function *FV = &*FB;
+        if (!FV->getName().ends_with("visitorf@") && !FV->getName().starts_with("llvm") && !FV->isDeclaration())
+        {
+          // if (check_phi)
+          // {
+          //   printf("function %s\n", FV->getName().str().c_str());
+          // }
+
+          // doing escape analysis
+          for (auto &BB : *FV)
+          {
+            for (auto &I : BB)
+            {
+              if (auto *alloca = dyn_cast<AllocaInst>(&I))
+              {
+                auto users = alloca->users();
+                for (auto *U : users)
+                {
+                  replaceCallArgsAddrspaces(U, builder, alloca, M, memsets, calls);
+                }
+              }
+              if (auto *alloca = dyn_cast<GetElementPtrInst>(&I))
+              {
+                // check addrspace is 0
+                if (alloca->getPointerAddressSpace() == 0)
+                {
+                  auto users = alloca->users();
+                  for (auto *U : users)
+                  {
+                    replaceCallArgsAddrspaces(U, builder, alloca, M, memsets, calls);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      for (auto *call : calls)
+      {
+        if (call->getParent())
+        {
+          call->replaceAllUsesWith(call);
+        }
+      }
     }
     return PreservedAnalyses::none();
   }
 
-  void EscapePass::replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *ptr, std::vector<llvm::GetElementPtrInst *> &geps)
+  void EscapePass::correctPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, llvm::IRBuilder<> &builder, llvm::Module &M, std::vector<llvm::PHINode *> &phis)
+  {
+    while (true)
+    {
+      auto noMorePhi = true;
+      for (auto &U : uses)
+      {
+
+        auto *user = U.getUser();
+        // if it's phi
+        if (auto *phi = dyn_cast<PHINode>(user))
+        {
+          noMorePhi = false;
+          // build a new phi which address space is 0
+          builder.SetInsertPoint(phi->getParent()->getFirstNonPHI());
+          auto newphi = builder.CreatePHI(PointerType::get(IntegerType::get(M.getContext(), 8), 0), phi->getNumIncomingValues());
+          for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
+          {
+            auto *incoming = phi->getIncomingValue(i);
+            auto *incomingBlock = phi->getIncomingBlock(i);
+            newphi->addIncoming(incoming, incomingBlock);
+          }
+          phi->replaceAllUsesWith(newphi);
+          phis.push_back(phi);
+          // printf("replaced phi\n");
+          uses = newphi->uses();
+        }
+      }
+      if (noMorePhi)
+      {
+        break;
+      }
+    }
+  }
+
+  void EscapePass::hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip)
+  {
+    for (auto &U : uses)
+    {
+      auto *user = U.getUser();
+      // if it's phi
+      // if (auto *phi = dyn_cast<PHINode>(user))
+      // {
+      //   skip = true;
+      //   break;
+      // }
+      if (auto *phi = dyn_cast<CallInst>(user))
+      {
+        skip = true;
+        break;
+      }
+      else if (auto *gep = dyn_cast<GetElementPtrInst>(user))
+      {
+        auto uses = gep->uses();
+        hasPhi(uses, skip);
+      }
+    }
+  }
+
+  void EscapePass::replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls)
+  {
+    if (auto *memset = dyn_cast<MemSetInst>(U))
+    {
+      auto *dest = memset->getDest();
+      auto *len = memset->getLength();
+      auto *value = memset->getValue();
+      builder.SetInsertPoint(memset);
+
+      auto *newmemset = builder.CreateMemSet(alloca, value, len, memset->getDestAlign(), memset->isVolatile());
+      memset->replaceAllUsesWith(newmemset);
+      memsets.push_back(memset);
+    }
+    if (auto *call = dyn_cast<CallInst>(U))
+    {
+      if (call->getCalledFunction()->getName().starts_with("llvm"))
+      {
+        return;
+      }
+
+      // change argument to address space 1 casted
+      for (unsigned i = 0; i < call->arg_size(); i++)
+      {
+        if (call->getArgOperand(i)->getName().equals(alloca->getName()))
+        {
+          // printf("replace call arg for fn %s\n", call->getCalledFunction()->getName().str().c_str());
+          builder.SetInsertPoint(call);
+          auto newaddr = builder.CreateAddrSpaceCast(alloca, PointerType::get(IntegerType::get(M.getContext(), 8), 1), "call_replace");
+          call->setArgOperand(i, newaddr);
+          // call->replaceAllUsesWith(call);
+          // call->print(errs());
+          break;
+        }
+      }
+    }
+  }
+
+  void EscapePass::replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *ptr, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls)
   {
     for (auto *U : users)
     {
@@ -367,12 +514,343 @@ namespace
         builder.SetInsertPoint(gep);
         auto *newgep = builder.CreateGEP(gep->getSourceElementType(), ptr, arr, gep->getName(), gep->isInBounds());
         auto newusers = gep->users();
-        replace_geps(newusers, builder, newgep, geps);
+        for (auto *U : newusers)
+        {
+          replaceCallArgsAddrspaces(U, builder, newgep, M, memsets, calls);
+        }
+        replace_geps(newusers, builder, newgep, geps, M, memsets, calls);
         gep->replaceAllUsesWith(newgep);
         // gep->eraseFromParent();
         geps.push_back(gep);
       }
     }
+  }
+
+  bool EscapePass::is_replacable(llvm::Value *value)
+  {
+    // if it's a call instruction and has pl_ordinary attribute
+    if (auto *call = dyn_cast<CallInst>(value))
+    {
+      if (auto *F = call->getCalledFunction())
+      {
+        auto attrs = call->getAttributes();
+        if (!attrs.hasRetAttr("pl_ordinary"))
+        {
+          return false;
+        }
+        if (!F->getName().equals("DioGC__malloc"))
+        {
+          return false;
+        }
+
+        if (!PointerMayBeCaptured(call, true, true))
+        {
+
+          auto info = attrs.getRetAttrs().getAttribute("pl_ordinary").getValueAsString();
+
+          // if the pointer may be captured, then we change this gc malloc
+          // to stack alloca
+
+          // the first argument of gc malloc is the size
+          auto *size = call->getArgOperand(0);
+
+          if (!isa<ConstantInt>(size) || !detail::isPresent(size))
+          {
+            // if the size is not a constant, we can't replace it with alloca
+            return false;
+          }
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool EscapePass::replaceNocapturedParams(Function &F)
+  {
+    auto M = F.getParent();
+      IRBuilder<> builder(M->getContext());
+      std::vector<CallInst *> mallocs;
+      std::vector<llvm::CallInst *> calls;
+      std::vector<PHINode *> phis;
+      std::vector<AllocaInst *> allocas;
+      std::vector<GetElementPtrInst *> geps;
+      std::vector<MemSetInst *> memsets;
+    // assert(F.getFunctionType()->isVarArg() && "Function isn't varargs!");
+    if (F.isDeclaration())
+      return false;
+    auto found = false;
+    auto attr = F.getAttributes();
+    std::vector<bool> replacable;
+    for (auto &arg : F.args())
+    {
+      auto thisattr = attr.getParamAttrs(arg.getArgNo());
+
+      if (thisattr.hasAttribute(Attribute::NoCapture) && thisattr.hasAttribute("pl_ordinary"))
+      {
+        found = true;
+        replacable.push_back(true);
+      }else {
+        replacable.push_back(false);
+      }
+    }
+    if (!found)
+    {
+      return false;
+    }
+    
+
+    // // Ensure that the function is only directly called.
+    // if (F.hasAddressTaken())
+    //   return false;
+
+    // Don't touch naked functions. The assembly might be using an argument, or
+    // otherwise rely on the frame layout in a way that this analysis will not
+    // see.
+    if (F.hasFnAttribute(Attribute::Naked))
+    {
+      return false;
+    }
+
+
+
+    // If we get here, there are no calls to llvm.vastart in the function body,
+    // remove the "..." and adjust all the calls.
+
+    // Start by computing a new prototype for the function, which is the same as
+    // the old function, but param addressespace is 0.
+    FunctionType *FTy = F.getFunctionType();
+
+    std::vector<Type *> Params;
+    // for FTy->param_begin(), FTy->param_end()
+    for (FunctionType::param_iterator I = FTy->param_begin(), E = FTy->param_end();
+         I != E; ++I)
+    {
+      if (replacable[I - FTy->param_begin()])
+      {
+        if ((*I)->getPointerAddressSpace() == 1)
+        {
+          Params.push_back(PointerType::get((*I), 0));
+        }else
+        {
+          Params.push_back(*I);
+        }
+        
+      }
+      else
+      {
+        Params.push_back(*I);
+      }
+    }
+    FunctionType *NFTy = FunctionType::get(FTy->getReturnType(), Params, FTy->isVarArg());
+
+    // Create the new function body and insert it into the module...
+    Function *NF = Function::Create(NFTy, F.getLinkage(), F.getAddressSpace());
+    NF->copyAttributesFrom(&F);
+    NF->setComdat(F.getComdat());
+    F.getParent()->getFunctionList().insert(F.getIterator(), NF);
+    NF->takeName(&F);
+    NF->IsNewDbgInfoFormat = F.IsNewDbgInfoFormat;
+
+    // Loop over all the callers of the function, transforming the call sites
+    // to pass in a smaller number of arguments into the new function.
+    //
+    std::vector<Value *> Args;
+    for (User *U : llvm::make_early_inc_range(F.users()))
+    {
+      CallBase *CB = dyn_cast<CallBase>(U);
+      if (!CB)
+        continue;
+
+      // Pass all the same arguments, change replacable arguments to address space 0
+      // (by performing a addressspacecast).
+      // for CB->arg_begin(), CB->arg_end()
+      for (auto I = CB->arg_begin(), E = CB->arg_end();
+           I != E; ++I)
+      {
+        if (replacable[I - CB->arg_begin()])
+        {
+          if ((*I)->getType()->getPointerAddressSpace() == 1)
+          {
+            Args.push_back(new AddrSpaceCastInst(*I, PointerType::get((*I)->getType(), 0), "", CB));
+          }
+        }
+        else
+        {
+          Args.push_back(*I);
+        }
+      }
+
+      // Drop any attributes that were on the vararg arguments.
+      AttributeList PAL = CB->getAttributes();
+      if (!PAL.isEmpty())
+      {
+        SmallVector<AttributeSet, 8> ArgAttrs;
+        for (unsigned ArgNo = 0; ArgNo < CB->arg_size(); ++ArgNo)
+          ArgAttrs.push_back(PAL.getParamAttrs(ArgNo));
+        PAL = AttributeList::get(F.getContext(), PAL.getFnAttrs(),
+                                 PAL.getRetAttrs(), ArgAttrs);
+      }
+
+      SmallVector<OperandBundleDef, 1> OpBundles;
+      CB->getOperandBundlesAsDefs(OpBundles);
+
+      CallBase *NewCB = nullptr;
+      if (InvokeInst *II = dyn_cast<InvokeInst>(CB))
+      {
+        NewCB = InvokeInst::Create(NF, II->getNormalDest(), II->getUnwindDest(),
+                                   Args, OpBundles, "", CB);
+      }
+      else
+      {
+        NewCB = CallInst::Create(NF, Args, OpBundles, "", CB);
+        cast<CallInst>(NewCB)->setTailCallKind(
+            cast<CallInst>(CB)->getTailCallKind());
+      }
+      NewCB->setCallingConv(CB->getCallingConv());
+      NewCB->setAttributes(PAL);
+      NewCB->copyMetadata(*CB, {LLVMContext::MD_prof, LLVMContext::MD_dbg});
+
+      Args.clear();
+
+      if (!CB->use_empty())
+        CB->replaceAllUsesWith(NewCB);
+
+      NewCB->takeName(CB);
+          NewCB->print(errs());
+          errs() << "\n";
+
+      // Finally, remove the old call from the program, reducing the use-count of
+      // F.
+      CB->eraseFromParent();
+    }
+
+
+      // Function::arg_iterator I2 = NF->arg_begin();
+      // for (Argument &Arg : F.args()) {
+      //   Arg.replaceAllUsesWith(&*I2);
+      //   I2->takeName(&Arg);
+      //   ++I2;
+      // }
+    // Since we have now created the new function, splice the body of the old
+    // function right into the new function, leaving the old rotting hulk of the
+    // function empty.
+    NF->splice(NF->begin(), &F);
+
+
+    // Loop over the argument list, transferring uses of the old arguments over to
+    // the new arguments, also transferring over the names as well.  While we're
+    // at it, remove the dead arguments from the DeadArguments list.
+    for (Function::arg_iterator I = F.arg_begin(), E = F.arg_end(),
+                                I2 = NF->arg_begin();
+         I != E; ++I, ++I2)
+    {
+      // Move the name and users over to the new version.
+      I->replaceAllUsesWith(&*I2);
+      I2->takeName(&*I);
+      if (replacable[I - F.arg_begin()])
+      {
+        auto users = I->users();
+        replace_geps(users, builder, &*I2, geps, *M, memsets, calls);
+        auto uses = I->uses();
+        correctPhi(uses, builder, *M, phis);
+        for (auto *U : users)
+        {
+          replaceCallArgsAddrspaces(U, builder, &*I2, *M, memsets, calls);
+        }
+      }
+      
+    }
+
+    // Clone metadata from the old function, including debug info descriptor.
+    SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
+    F.getAllMetadata(MDs);
+    for (auto [KindID, Node] : MDs)
+      NF->addMetadata(KindID, *Node);
+
+    // Fix up any BlockAddresses that refer to the function.
+    F.replaceAllUsesWith(NF);
+    // Delete the bitcast that we just created, so that NF does not
+    // appear to be address-taken.
+    NF->removeDeadConstantUsers();
+    // Finally, nuke the old function.
+    F.eraseFromParent();
+    NF->print(errs());
+              errs() << "\n";
+// delete previous nodes.
+      for (auto *call : mallocs)
+      {
+        call->eraseFromParent();
+      }
+      for (auto *phi : phis)
+      {
+        if (phi->getParent())
+        {
+          phi->eraseFromParent();
+        }
+      }
+      for (auto *gep : geps)
+      {
+        if (gep->getParent())
+        {
+          gep->eraseFromParent();
+        }
+      }
+      for (auto *memset : memsets)
+      {
+        if (memset->getParent())
+        {
+          memset->eraseFromParent();
+        }
+      }
+    return true;
+  }
+
+  bool EscapePass::are_phis_replacable(llvm::iterator_range<llvm::Value::use_iterator> &uses, int level)
+  {
+    if (level > 100)
+    {
+      return false;
+    }
+
+    while (true)
+    {
+      auto noMorePhi = true;
+      for (auto &U : uses)
+      {
+
+        auto *user = U.getUser();
+        // if it's phi
+        if (auto *phi = dyn_cast<PHINode>(user))
+        {
+          noMorePhi = false;
+          // check if each incoming value is capable of being replaced
+
+          for (unsigned i = 0; i < phi->getNumIncomingValues(); i++)
+          {
+            auto *incoming = phi->getIncomingValue(i);
+
+            if (!is_replacable(incoming))
+            {
+              return false;
+            }
+            auto uses = incoming->uses();
+            if (!are_phis_replacable(uses, level + 1))
+            {
+              return false;
+            }
+          }
+
+          // printf("replaced phi\n");
+          uses = phi->uses();
+        }
+      }
+      if (noMorePhi)
+      {
+        break;
+      }
+    }
+    return true;
   }
 
   /*
@@ -411,7 +889,7 @@ namespace
     {
       return;
     }
-    
+
     // auto gc_init_c = M.getOrInsertFunction("__gc_init_stackmap", Type::getVoidTy(M.getContext()));
     auto immix_init_c = M.getOrInsertFunction("immix_gc_init", Type::getVoidTy(M.getContext()), PointerType::get(IntegerType::get(M.getContext(), 8), 0));
     auto immix_init_f = cast<Function>(immix_init_c.getCallee());

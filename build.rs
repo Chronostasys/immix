@@ -12,6 +12,7 @@ fn main() {
         println!("cargo:rerun-if-changed=llvm/plimmix_pass.cpp");
         println!("cargo:rerun-if-changed=llvm/memory_manager.cpp");
         println!("cargo:rerun-if-changed=llvm/pljit.cpp");
+        println!("cargo:rerun-if-changed=llvm/rewriteStatepointForGC.cpp");
         println!("cargo:rerun-if-changed=llvm/CMakeLists.txt");
         let dst = cmake::Config::new("llvm").static_crt(true).build();
         println!("cargo:rustc-link-search=native={}/build", dst.display());

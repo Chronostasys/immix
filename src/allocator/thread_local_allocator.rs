@@ -236,7 +236,7 @@ impl ThreadLocalAllocator {
                 return std::ptr::null_mut();
             }
             unsafe {
-                let (s, nxt) = (*block).alloc(size, obj_type).unwrap();
+                let (s, nxt) = (*block).alloc(size, obj_type).unwrap_unchecked();
                 let re = (*block).get_nth_line(s);
                 if !nxt {
                     self.unavailable_blocks.push(block);
@@ -246,10 +246,10 @@ impl ThreadLocalAllocator {
                 return re;
             }
         }
-        let mut f = self.recyclable_blocks.front().unwrap();
+        let mut f = unsafe{self.recyclable_blocks.front().unwrap_unchecked()};
         unsafe {
             while (**f).is_eva_candidate() {
-                let uf = self.recyclable_blocks.pop_front().unwrap();
+                let uf = self.recyclable_blocks.pop_front().unwrap_unchecked();
                 self.unavailable_blocks.push(uf);
                 let ff = self.recyclable_blocks.front();
                 if let Some(ff) = ff {
@@ -274,7 +274,7 @@ impl ThreadLocalAllocator {
         let re = unsafe { (**f).get_nth_line(s) };
         if !nxt {
             // 当前block被用完，将它从recyclable blocks中移除，加入unavailable blocks
-            let used_block = self.recyclable_blocks.pop_front().unwrap();
+            let used_block = unsafe{self.recyclable_blocks.pop_front().unwrap_unchecked()};
             self.unavailable_blocks.push(used_block);
         }
         re
@@ -292,6 +292,7 @@ impl ThreadLocalAllocator {
     ///
     /// * `*mut u8` - object pointer
     pub fn overflow_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+        // eprintln!("overflow alloc");
         // 获取新block
         let new_block = self.get_new_block();
         if new_block.is_null() {

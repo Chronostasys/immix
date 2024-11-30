@@ -71,6 +71,7 @@ pub struct Block {
     hole_num: usize,
     available_line_num: usize,
     eva_target: bool,
+    next_hole_size: usize,
 }
 
 impl HeaderExt for u8 {
@@ -195,6 +196,7 @@ impl Block {
                 hole_num: 1,
                 available_line_num: NUM_LINES_PER_BLOCK - 3,
                 eva_target: false,
+                next_hole_size:NUM_LINES_PER_BLOCK - 3
             });
 
             &mut *ptr
@@ -240,6 +242,7 @@ impl Block {
         self.marked = false;
         self.hole_num = 1;
         self.available_line_num = NUM_LINES_PER_BLOCK - 3;
+        self.next_hole_size = NUM_LINES_PER_BLOCK - 3;
         self.eva_target = false;
     }
 
@@ -306,6 +309,7 @@ impl Block {
 
         self.cursor = first_hole_line_idx;
         self.marked = false;
+        self.next_hole_size = first_hole_line_len;
         self.hole_num = holes;
         // self.eva_target = false;
         if let Some(count) = (*mark_histogram).get_mut(&self.hole_num) {
@@ -325,6 +329,7 @@ impl Block {
     /// Return the start line index and the length of the hole (u8, u8).
     ///
     /// If no hole found, return `None`.
+    #[inline(never)]
     pub fn find_next_hole(
         &self,
         prev_hole: (usize, usize),
@@ -483,6 +488,23 @@ impl Block {
     pub unsafe fn alloc(&mut self, size: usize, obj_type: ObjectType) -> Option<(usize, bool)> {
         let cursor = self.cursor;
         let line_size = (size - 1) / LINE_SIZE + 1;
+        if self.next_hole_size >= line_size { // fast path
+            self.available_line_num -= line_size;
+            for i in (self.cursor + 1)..=self.cursor - 1 + line_size {
+                let header = self.line_map.get_unchecked_mut(i);
+                header.set_used(true);
+            }
+            let start = self.cursor;
+            // 设置起始line header的obj_type
+            let header = self.line_map.get_unchecked_mut(start);
+            *header |= (obj_type as u8) << 2 | 0b10000001;
+            self.cursor += line_size;
+            self.next_hole_size = self.next_hole_size - line_size;
+            // if self.next_hole_size == 0 {
+            //     self.hole_num -= 1;
+            // }
+            return Some((start, self.available_line_num > 0));
+        }
         if line_size + self.cursor > NUM_LINES_PER_BLOCK {
             return None;
         }
@@ -492,29 +514,19 @@ impl Block {
             self.available_line_num -= line_size;
             // 标记为已使用
             for i in start..=start - 1 + line_size {
-                let header = self.line_map.get_mut(i).unwrap();
+                let header = self.line_map.get_unchecked_mut(i);
                 header.set_used(true);
             }
             // 设置起始line header的obj_type
-            let header = self.line_map.get_mut(start).unwrap();
+            let header = self.line_map.get_unchecked_mut(start);
             *header |= (obj_type as u8) << 2 | 0b10000000;
 
             // 更新first_hole_line_idx和first_hole_line_len
-            if start == self.cursor {
-                self.cursor += line_size;
-                // self.limit -= line_size;
-            }
-            if let Some((idx, _)) = self.find_next_hole((self.cursor, 0), 1) {
-                self.cursor = idx;
-            } else {
-                self.hole_num -= 1;
-                return Some((start, false));
-            }
-            if self.cursor > start + len && len == line_size {
-                // 正好匹配，那么减少一个hole
-                self.hole_num -= 1;
-            }
-            return Some((start, true));
+            self.cursor = start + line_size;
+            self.next_hole_size = len - line_size;
+
+            return Some((start, self.available_line_num > 0));
+
         }
         None
     }
