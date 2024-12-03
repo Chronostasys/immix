@@ -15,7 +15,6 @@ backtrace = "0.3"
 log = "0.4"
 threadpool = {version = "1.8"}
 sys-info = {git="https://github.com/Pivot-Studio/sys-info-rs.git"}
-os-thread-local = "0.1.3"
 once_cell = "1.20.2"
 
 [target.'cfg(windows)'.dependencies]
@@ -46,6 +45,7 @@ llvm_gc_plugin = ["llvm_gc_plugin_lib"]
 llvm_gc_plugin_lib = []
 auto_gc = []
 conservative_stack_scan = []
+gc_profile = []
 
 
 [build-dependencies]

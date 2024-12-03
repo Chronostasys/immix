@@ -3,7 +3,7 @@ use std::{
     cell::RefCell,
     cmp::min,
     sync::{
-        atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
         Arc,
     },
@@ -14,10 +14,17 @@ use libc::malloc;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "gc_profile")]
+use crate::GC_INIT_TIME;
 #[cfg(feature = "llvm_stackmap")]
 use crate::STACK_MAP;
 use crate::{
-    allocator::{GlobalAllocator, ThreadLocalAllocator}, block::{Block, LineHeaderExt, ObjectType}, gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, ENABLE_EVA, FREE_SPACE_DIVISOR, GC_AUTOCOLLECT_ENABLE, GC_COLLECTOR_COUNT, GC_ID, GC_INIT_TIME, GC_MARKING, GC_MARK_COND, GC_RUNNING, GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK, REMAIN_MULTIPLIER, SHOULD_EXIT, SHRINK_PROPORTION, THRESHOLD_PROPORTION, USED_SPACE_DIVISOR, USE_SHADOW_STACK
+    allocator::{GlobalAllocator, ThreadLocalAllocator},
+    block::{Block, LineHeaderExt, ObjectType},
+    gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, ENABLE_EVA, FREE_SPACE_DIVISOR,
+    GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING, GC_STW_COUNT, GC_SWEEPING,
+    GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK, REMAIN_MULTIPLIER,
+    SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
 };
 
 fn get_ip_from_sp(sp: *mut u8) -> *mut u8 {
@@ -100,9 +107,10 @@ struct CollectorStatus {
     last_gc_remaining: usize,
     collecting: bool,
     total_stuck_time: Duration,
+    am_i_triggered: bool,
 }
 
-static TIME_TO_SAFE_POINT_US : AtomicU64 = AtomicU64::new(0);
+static TIME_TO_SAFE_POINT_US: AtomicU64 = AtomicU64::new(0);
 
 pub type VisitFunc = unsafe extern "C" fn(&Collector, *mut u8);
 
@@ -160,11 +168,12 @@ impl Collector {
                 mark_histogram: memvecmap,
                 queue: memqueue,
                 status: RefCell::new(CollectorStatus {
-                    collect_threshold: 1024* 1024 * 10,
+                    collect_threshold: 1024 * 1024 * 10,
                     bytes_allocated_since_last_gc: 0,
                     collecting: false,
                     last_gc_remaining: 0,
                     total_stuck_time: Duration::default(),
+                    am_i_triggered: false,
                 }),
                 frames_list: AtomicPtr::default(),
                 live_set: RefCell::new(FxHashMap::default()),
@@ -218,6 +227,7 @@ impl Collector {
     /// Allocate a new object, if it trigger a GC, it will use stack pointer to walk gc frames.
     ///
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
+    #[inline(always)]
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
         if size == 0 {
             panic!("alloc size can not be zero");
@@ -240,17 +250,23 @@ impl Collector {
         ptr
     }
 
+    #[inline(always)]
     fn collect_if_needed_fast_unwind(&self, sp: *mut u8) {
         if GC_RUNNING.load(Ordering::Relaxed) {
             self.collect_fast_unwind(sp);
             return;
         }
-        let status = self.status.borrow();
+        let mut status = self.status.borrow_mut();
         if (status.bytes_allocated_since_last_gc + status.last_gc_remaining * REMAIN_MULTIPLIER
-            >= status.collect_threshold
-            && GC_AUTOCOLLECT_ENABLE.load(Ordering::Relaxed))
-            || (unsafe { self.thread_local_allocator.as_mut().unwrap_unchecked().should_gc() })
+            >= status.collect_threshold)
+            || (unsafe {
+                self.thread_local_allocator
+                    .as_mut()
+                    .unwrap_unchecked()
+                    .should_gc()
+            })
         {
+            status.am_i_triggered = true;
             drop(status);
             self.collect_fast_unwind(sp);
         } else {
@@ -287,7 +303,7 @@ impl Collector {
             let ptr = self
                 .thread_local_allocator
                 .as_mut()
-                .unwrap()
+                .unwrap_unchecked()
                 .alloc(size, obj_type);
             ptr
         }
@@ -424,7 +440,7 @@ impl Collector {
             } else if self
                 .thread_local_allocator
                 .as_mut()
-                .unwrap()
+                .unwrap_unchecked()
                 .in_big_heap(ptr)
             {
                 let big_obj = self
@@ -683,7 +699,7 @@ impl Collector {
     /// to emit __eh_frame section.
     ///
     /// [2]:https://github.com/llvm/llvm-project/issues/49036
-    pub fn mark_fast_unwind(&self, sp: *mut u8)  {
+    pub fn mark_fast_unwind(&self, sp: *mut u8) {
         // let start1 = Instant::now();
         let mutex = STUCK_MUTEX.lock();
         GC_RUNNING.store(true, Ordering::Release);
@@ -719,10 +735,15 @@ impl Collector {
             }
             drop(v);
         }
-        if self.id !=0 {
-            // TIME_TO_SAFE_POINT_US.fetch_add(start1.elapsed().as_nanos() as u64, Ordering::Relaxed);   
+        if self.id != 0 {
+            // TIME_TO_SAFE_POINT_US.fetch_add(start1.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
-        // eprintln!("gc {} done mark sync at {:?}", self.id, GC_INIT_TIME.elapsed().as_nanos());
+        #[cfg(feature = "gc_profile")]
+        eprintln!(
+            "gc {} done mark sync at {:?}",
+            self.id,
+            GC_INIT_TIME.elapsed().as_nanos()
+        );
         // let inst = Instant::now();
         #[cfg(feature = "shadow_stack")]
         {
@@ -840,7 +861,6 @@ impl Collector {
             GC_RUNNING.store(false, Ordering::Release);
             drop(v);
         }
-        return ;
     }
 
     /// # mark_gc_frames
@@ -937,29 +957,37 @@ impl Collector {
                 .sweep(self.mark_histogram)
         };
         let previous_threshold = self.status.borrow().collect_threshold;
-        let previous_remaining = self.status.borrow().last_gc_remaining;
+        // let previous_remaining = self.status.borrow().last_gc_remaining;
         let remaining = used.0;
-        let this = self.status.borrow().bytes_allocated_since_last_gc + previous_remaining - remaining;
-        if this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize {
+        let this = self.status.borrow().bytes_allocated_since_last_gc;
+        if this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
+            && self.status.borrow().am_i_triggered
+        {
             // expand threshold
             self.status.borrow_mut().collect_threshold = min(
                 (previous_threshold as f64 * THRESHOLD_PROPORTION) as usize,
                 unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
             );
         }
-         else if remaining <= (previous_threshold as f64 / USED_SPACE_DIVISOR as f64) as usize {
-            // shrink threshold
-            self.status.borrow_mut().collect_threshold =
-                (previous_threshold as f64 * SHRINK_PROPORTION) as usize;
-        }
+        //  else if remaining <= (previous_threshold as f64 / USED_SPACE_DIVISOR as f64) as usize {
+        //     // shrink threshold
+        //     self.status.borrow_mut().collect_threshold =
+        //         (previous_threshold as f64 * SHRINK_PROPORTION) as usize;
+        // }
         self.status.borrow_mut().bytes_allocated_since_last_gc = 0;
         self.status.borrow_mut().last_gc_remaining = remaining;
+        self.status.borrow_mut().am_i_triggered = false;
 
         let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         if v - 1 == 0 {
             GC_SWEEPING.store(false, Ordering::Release);
         }
-        // eprintln!("gc {} done sweep at {:?}", self.id, GC_INIT_TIME.elapsed().as_nanos());
+        #[cfg(feature = "gc_profile")]
+        eprintln!(
+            "gc {} done sweep at {:?}",
+            self.id,
+            GC_INIT_TIME.elapsed().as_nanos()
+        );
         used
         // used
     }
@@ -1003,7 +1031,12 @@ impl Collector {
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn collect_fast_unwind(&self, sp: *mut u8) {
-        // eprintln!("gc {} start collect at {:?}", self.id, GC_INIT_TIME.elapsed().as_nanos());
+        #[cfg(feature = "gc_profile")]
+        eprintln!(
+            "gc {} start collect at {:?}",
+            self.id,
+            GC_INIT_TIME.elapsed().as_nanos()
+        );
         // unsafe {
         //     self.thread_local_allocator.as_ref().unwrap().verify();
         // }
@@ -1066,7 +1099,7 @@ impl Collector {
                 .unwrap()
                 .set_collect_mode(true);
         }
-        let start = self.mark_fast_unwind(sp);
+        self.mark_fast_unwind(sp);
         // let mark_time = time.elapsed();
         let (_used, free) = self.sweep();
         // let sweep_time = time.elapsed() - mark_time;
@@ -1109,7 +1142,10 @@ impl Collector {
     }
 
     pub fn gc_stw_duration(&self) -> Duration {
-        println!("total time to safepoint: {:?}", Duration::from_nanos(TIME_TO_SAFE_POINT_US.load(Ordering::Relaxed)));
+        println!(
+            "total time to safepoint: {:?}",
+            Duration::from_nanos(TIME_TO_SAFE_POINT_US.load(Ordering::Relaxed))
+        );
         self.status.borrow().total_stuck_time
     }
 
@@ -1151,8 +1187,10 @@ impl Collector {
                         break;
                     } else {
                         if !GC_RUNNING.load(Ordering::Acquire) {
-                            STUCK_COND
-                            .wait_until(&mut mutex, Instant::now() + Duration::from_millis(100));
+                            STUCK_COND.wait_until(
+                                &mut mutex,
+                                Instant::now() + Duration::from_millis(100),
+                            );
                         }
                         drop(mutex);
                         c.safepoint();

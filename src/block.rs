@@ -196,7 +196,7 @@ impl Block {
                 hole_num: 1,
                 available_line_num: NUM_LINES_PER_BLOCK - 3,
                 eva_target: false,
-                next_hole_size:NUM_LINES_PER_BLOCK - 3
+                next_hole_size: NUM_LINES_PER_BLOCK - 3,
             });
 
             &mut *ptr
@@ -484,11 +484,13 @@ impl Block {
     /// # Safety
     ///
     /// The caller must ensure that the size is valid.
-    #[inline]
+    #[inline(always)]
     pub unsafe fn alloc(&mut self, size: usize, obj_type: ObjectType) -> Option<(usize, bool)> {
+        debug_assert!(self.available_line_num <= NUM_LINES_PER_BLOCK - 3);
         let cursor = self.cursor;
         let line_size = (size - 1) / LINE_SIZE + 1;
-        if self.next_hole_size >= line_size { // fast path
+        if self.next_hole_size >= line_size {
+            // fast path
             self.available_line_num -= line_size;
             for i in (self.cursor + 1)..=self.cursor - 1 + line_size {
                 let header = self.line_map.get_unchecked_mut(i);
@@ -499,7 +501,7 @@ impl Block {
             let header = self.line_map.get_unchecked_mut(start);
             *header |= (obj_type as u8) << 2 | 0b10000001;
             self.cursor += line_size;
-            self.next_hole_size = self.next_hole_size - line_size;
+            self.next_hole_size -= line_size;
             // if self.next_hole_size == 0 {
             //     self.hole_num -= 1;
             // }
@@ -526,7 +528,6 @@ impl Block {
             self.next_hole_size = len - line_size;
 
             return Some((start, self.available_line_num > 0));
-
         }
         None
     }

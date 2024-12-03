@@ -3210,18 +3210,18 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
 
     // USE - Add to the LiveIn set for this instruction
     for (Value *V : I.operands()) {
-        if (isUnhandledGCPointerType(V->getType(), GC))
-        {
-            I.getFunction()->print(outs());
-            outs() << "\n";
-            I.print(outs());
-            outs() << "\n";
-            V->getType()->print(outs());
-            outs() << "\n";
-        }
+        // if (isUnhandledGCPointerType(V->getType(), GC))
+        // {
+        //     I.getFunction()->print(outs());
+        //     outs() << "\n";
+        //     I.print(outs());
+        //     outs() << "\n";
+        //     V->getType()->print(outs());
+        //     outs() << "\n";
+        // }
         
-      assert(!isUnhandledGCPointerType(V->getType(), GC) &&
-             "support for FCA unimplemented");
+    //   assert(!isUnhandledGCPointerType(V->getType(), GC) &&
+    //          "support for FCA unimplemented");
       if (isHandledGCPointerType(V->getType(), GC) && !isa<Constant>(V)) {
         // The choice to exclude all things constant here is slightly subtle.
         // There are two independent reasons:

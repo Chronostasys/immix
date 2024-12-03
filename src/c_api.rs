@@ -46,12 +46,8 @@ impl DioGC {
     pub unsafe fn remove_coro_stack(stack: *mut u8) {
         crate::remove_coro_stack(stack);
     }
-    pub unsafe fn disable_auto_collect() {
-        crate::gc_disable_auto_collect();
-    }
-    pub unsafe fn enable_auto_collect() {
-        crate::gc_enable_auto_collect();
-    }
+    pub unsafe fn disable_auto_collect() {}
+    pub unsafe fn enable_auto_collect() {}
     pub unsafe fn stuck_begin(sp: *mut u8) {
         crate::thread_stuck_start_fast(sp);
     }
@@ -183,7 +179,6 @@ pub unsafe extern "C" fn DioGC__about() {
 pub unsafe extern "C" fn gc_exit_block() {
     crate::exit_block()
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn gc_print_block_time() {

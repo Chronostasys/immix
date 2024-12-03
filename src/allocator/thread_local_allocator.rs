@@ -223,6 +223,7 @@ impl ThreadLocalAllocator {
     /// ## Return
     ///
     /// * `*mut u8` - object pointer
+    #[inline(always)]
     pub fn alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
         // big size object
         if size > ((BLOCK_SIZE / LINE_SIZE - 3) / 4 - 1) * LINE_SIZE {
@@ -246,7 +247,7 @@ impl ThreadLocalAllocator {
                 return re;
             }
         }
-        let mut f = unsafe{self.recyclable_blocks.front().unwrap_unchecked()};
+        let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
         unsafe {
             while (**f).is_eva_candidate() {
                 let uf = self.recyclable_blocks.pop_front().unwrap_unchecked();
@@ -274,7 +275,7 @@ impl ThreadLocalAllocator {
         let re = unsafe { (**f).get_nth_line(s) };
         if !nxt {
             // 当前block被用完，将它从recyclable blocks中移除，加入unavailable blocks
-            let used_block = unsafe{self.recyclable_blocks.pop_front().unwrap_unchecked()};
+            let used_block = unsafe { self.recyclable_blocks.pop_front().unwrap_unchecked() };
             self.unavailable_blocks.push(used_block);
         }
         re
@@ -309,7 +310,7 @@ impl ThreadLocalAllocator {
             // unsafe {
             //     debug_assert!((*new_block).find_first_hole().is_some());
             // }
-            self.recyclable_blocks.push_back(new_block);
+            self.recyclable_blocks.push_front(new_block);
         }
         re
     }

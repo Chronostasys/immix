@@ -156,7 +156,7 @@ namespace
   public:
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
     void correctPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, llvm::IRBuilder<> &builder, llvm::Module &M, std::__1::vector<llvm::PHINode *> &phis);
-    void hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip);
+    void hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip, int level);
     void replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls);
     /*
       Regenerate the gep instructions with new address space
@@ -205,6 +205,7 @@ namespace
       std::vector<AllocaInst *> allocas;
       std::vector<GetElementPtrInst *> geps;
       std::vector<MemSetInst *> memsets;
+      std::vector<AddrSpaceCastInst *> addrspaces;
       // find all gc atomic type allocations, analysis to get non-escaped set.
       for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
       {
@@ -217,17 +218,36 @@ namespace
             for (auto &I : BB)
             {
 
+              if (auto cast = dyn_cast<AddrSpaceCastInst>(&I))
+              {
+                // check if dst and src address space is same, if so add to delete list
+                if (cast->getDestAddressSpace() == cast->getSrcAddressSpace())
+                {
+                  // change all uses to src address space
+                  cast->replaceAllUsesWith(cast->getOperand(0));
+                  addrspaces.push_back(cast);
+                }
+              }
+              
               // if it's a call instruction and has pl_ordinary attribute
               if (auto *call = dyn_cast<CallInst>(&I))
               {
                 if (auto *F = call->getCalledFunction())
                 {
                   auto attrs = call->getAttributes();
-                  if (!attrs.hasRetAttr("pl_ordinary"))
+                  if (!F->getName().equals("DioGC__malloc"))
                   {
                     continue;
                   }
-                  if (!F->getName().equals("DioGC__malloc"))
+                  auto * ty = call->getArgOperand(1);
+                  if (!isa<ConstantInt>(ty) || !detail::isPresent(ty))
+                  {
+                    // if the size is not a constant, we can't replace it with alloca
+                    continue;
+                  }
+                  auto *tyValue = dyn_cast<ConstantInt>(ty);
+                  auto tyInt = tyValue->getZExtValue();
+                  if (!attrs.hasRetAttr("pl_ordinary") && tyInt != 0)
                   {
                     continue;
                   }
@@ -256,7 +276,7 @@ namespace
                     if (check_phi)
                     {
                       auto skip = false;
-                      hasPhi(uses, skip);
+                      hasPhi(uses, skip,100);
                       if (skip)
                       {
                         continue;
@@ -284,6 +304,7 @@ namespace
                     {
                       alloca.setAlignment(llvm::Align(8));
                     }
+                    alloca.takeName(call);
 
                     // find all gep, replace address space with 0
                     auto users = call->users();
@@ -393,6 +414,13 @@ namespace
           call->replaceAllUsesWith(call);
         }
       }
+      for (auto *address : addrspaces)
+      {
+        if (address->getParent())
+        {
+          address->eraseFromParent();
+        }
+      }
     }
     return PreservedAnalyses::none();
   }
@@ -432,8 +460,13 @@ namespace
     }
   }
 
-  void EscapePass::hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip)
+  void EscapePass::hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip, int level)
   {
+    if (!are_phis_replacable(uses,level))
+    {
+      skip = true;
+      return;
+    }
     for (auto &U : uses)
     {
       auto *user = U.getUser();
@@ -443,16 +476,37 @@ namespace
       //   skip = true;
       //   break;
       // }
-      if (auto *phi = dyn_cast<CallInst>(user))
+      if (auto *call = dyn_cast<CallInst>(user))
       {
-        skip = true;
-        break;
+        // check if function's corresponding argument type is address space 1 pointer
+        auto *F = call->getFunctionType();
+        if (F)
+        {
+          auto arg = F->getParamType(U.getOperandNo());
+          if (arg->isPointerTy() && arg->getPointerAddressSpace() == 1)
+          {
+            skip = true;
+            break;
+          }
+        }
+        
       }
-      else if (auto *gep = dyn_cast<GetElementPtrInst>(user))
+      //  if (!is_replacable(user))
+      // {
+      //   skip = true;
+      //   break;
+      // }
+      
+      if (auto *gep = dyn_cast<GetElementPtrInst>(user))
       {
         auto uses = gep->uses();
-        hasPhi(uses, skip);
+        hasPhi(uses, skip,level);
       }
+      if (skip == true)
+      {
+        break;
+      }
+      
     }
   }
 
@@ -469,28 +523,7 @@ namespace
       memset->replaceAllUsesWith(newmemset);
       memsets.push_back(memset);
     }
-    if (auto *call = dyn_cast<CallInst>(U))
-    {
-      if (call->getCalledFunction()->getName().starts_with("llvm"))
-      {
-        return;
-      }
 
-      // change argument to address space 1 casted
-      for (unsigned i = 0; i < call->arg_size(); i++)
-      {
-        if (call->getArgOperand(i)->getName().equals(alloca->getName()))
-        {
-          // printf("replace call arg for fn %s\n", call->getCalledFunction()->getName().str().c_str());
-          builder.SetInsertPoint(call);
-          auto newaddr = builder.CreateAddrSpaceCast(alloca, PointerType::get(IntegerType::get(M.getContext(), 8), 1), "call_replace");
-          call->setArgOperand(i, newaddr);
-          // call->replaceAllUsesWith(call);
-          // call->print(errs());
-          break;
-        }
-      }
-    }
   }
 
   void EscapePass::replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *ptr, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls)
@@ -534,16 +567,16 @@ namespace
       if (auto *F = call->getCalledFunction())
       {
         auto attrs = call->getAttributes();
-        if (!attrs.hasRetAttr("pl_ordinary"))
-        {
-          return false;
-        }
+        // if (!attrs.hasRetAttr("pl_ordinary"))
+        // {
+        //   return false;
+        // }
         if (!F->getName().equals("DioGC__malloc"))
         {
           return false;
         }
 
-        if (!PointerMayBeCaptured(call, true, true))
+        if (!PointerMayBeCaptured(call, true, false))
         {
 
           auto info = attrs.getRetAttrs().getAttribute("pl_ordinary").getValueAsString();
@@ -559,10 +592,31 @@ namespace
             // if the size is not a constant, we can't replace it with alloca
             return false;
           }
+          auto * ty = call->getArgOperand(1);
+          if (!isa<ConstantInt>(ty) || !detail::isPresent(ty))
+          {
+            // if the size is not a constant, we can't replace it with alloca
+            return false;
+          }
+          auto *tyValue = dyn_cast<ConstantInt>(ty);
+          auto tyInt = tyValue->getZExtValue();
+          if (!attrs.hasRetAttr("pl_ordinary") && tyInt != 0)
+          {
+            return false;
+          }
           return true;
         }
       }
     }
+    if (auto * arg = dyn_cast<Argument>(value))
+    {
+      auto thisattr = arg->getParent()->getAttributes().getParamAttrs(arg->getArgNo());
+      if (thisattr.hasAttribute(Attribute::NoCapture) && thisattr.hasAttribute("pl_ordinary") && arg->getType()->isPointerTy())
+      {
+        return true;
+      }
+    }
+    
     return false;
   }
 
@@ -585,8 +639,10 @@ namespace
     for (auto &arg : F.args())
     {
       auto thisattr = attr.getParamAttrs(arg.getArgNo());
-
-      if (thisattr.hasAttribute(Attribute::NoCapture) && thisattr.hasAttribute("pl_ordinary"))
+          auto uses = arg.uses();
+          auto skip = false;
+          hasPhi(uses, skip,100);
+      if (thisattr.hasAttribute(Attribute::NoCapture) && thisattr.hasAttribute("pl_ordinary") && arg.getType()->getPointerAddressSpace() == 1 && arg.getType()->isPointerTy()&&are_phis_replacable(uses, 100) &&!skip)
       {
         found = true;
         replacable.push_back(true);
@@ -618,7 +674,7 @@ namespace
     // remove the "..." and adjust all the calls.
 
     // Start by computing a new prototype for the function, which is the same as
-    // the old function, but param addressespace is 0.
+    // the old function, but param addressespace is 0
     FunctionType *FTy = F.getFunctionType();
 
     std::vector<Type *> Params;
@@ -663,16 +719,18 @@ namespace
         continue;
 
       // Pass all the same arguments, change replacable arguments to address space 0
-      // (by performing a addressspacecast).
+      // (by performing a addressspacecast). remove tail/must tail hint, as we may pass allocas as args https://llvm.org/docs/LangRef.html#id332
       // for CB->arg_begin(), CB->arg_end()
       for (auto I = CB->arg_begin(), E = CB->arg_end();
            I != E; ++I)
       {
         if (replacable[I - CB->arg_begin()])
         {
-          if ((*I)->getType()->getPointerAddressSpace() == 1)
+          if ((*I)->getType()->isPointerTy() && (*I)->getType()->getPointerAddressSpace() == 1)
           {
             Args.push_back(new AddrSpaceCastInst(*I, PointerType::get((*I)->getType(), 0), "", CB));
+          }else {
+            Args.push_back(*I);
           }
         }
         else
@@ -705,7 +763,7 @@ namespace
       {
         NewCB = CallInst::Create(NF, Args, OpBundles, "", CB);
         cast<CallInst>(NewCB)->setTailCallKind(
-            cast<CallInst>(CB)->getTailCallKind());
+            CallInst::TCK_None); // Drop the tail call hint.
       }
       NewCB->setCallingConv(CB->getCallingConv());
       NewCB->setAttributes(PAL);
@@ -750,9 +808,9 @@ namespace
       I2->takeName(&*I);
       if (replacable[I - F.arg_begin()])
       {
-        auto users = I->users();
+        auto users = I2->users();
         replace_geps(users, builder, &*I2, geps, *M, memsets, calls);
-        auto uses = I->uses();
+        auto uses = I2->uses();
         correctPhi(uses, builder, *M, phis);
         for (auto *U : users)
         {

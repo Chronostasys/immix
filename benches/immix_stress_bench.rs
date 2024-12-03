@@ -6,7 +6,7 @@ use immix::*;
 fn immix_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("plimmixgc");
     group.sample_size(10);
-    gc_enable_auto_collect();
+    // gc_enable_auto_collect();
     // 这个测试中并没有记录所有的gcroot，如果启用evacuation
     // 可能会导致部分指针驱逐后不自愈
     set_evacuation(false);

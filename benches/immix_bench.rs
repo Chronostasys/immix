@@ -6,7 +6,7 @@ use libc::malloc;
 use rand::random;
 
 fn immix_benchmark_multi_thread(c: &mut Criterion) {
-    gc_disable_auto_collect();
+    // gc_disable_auto_collect();
     set_evacuation(false);
     bench_n_threads(get_threads())(c);
 }
@@ -26,7 +26,7 @@ fn bench_n_threads(n: usize) -> impl Fn(&mut Criterion) {
 }
 
 fn immix_benchmark_single_thread(c: &mut Criterion) {
-    gc_disable_auto_collect();
+    // gc_disable_auto_collect();
     set_evacuation(false);
     c.bench_function(
         &format!("singlethread gc benchmark--{} small objects", OBJ_NUM),
@@ -64,7 +64,7 @@ fn immix_benchmark_single_thread(c: &mut Criterion) {
 // }
 
 fn immix_benchmark_single_thread_alloc(c: &mut Criterion) {
-    gc_disable_auto_collect();
+    // gc_disable_auto_collect();
     set_evacuation(false);
     let mut g = c.benchmark_group("allocation bench");
     if option_env!("PL_IMMIX_HEAP_SIZE").is_none() {
