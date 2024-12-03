@@ -482,7 +482,7 @@ namespace
         auto *F = call->getFunctionType();
         if (F)
         {
-          auto arg = F->getParamType(U.getOperandNo());
+          auto arg = call->getOperand(U.getOperandNo())->getType();
           if (arg->isPointerTy() && arg->getPointerAddressSpace() == 1)
           {
             skip = true;
@@ -775,8 +775,8 @@ namespace
         CB->replaceAllUsesWith(NewCB);
 
       NewCB->takeName(CB);
-          NewCB->print(errs());
-          errs() << "\n";
+          // NewCB->print(errs());
+          // errs() << "\n";
 
       // Finally, remove the old call from the program, reducing the use-count of
       // F.
@@ -833,8 +833,8 @@ namespace
     NF->removeDeadConstantUsers();
     // Finally, nuke the old function.
     F.eraseFromParent();
-    NF->print(errs());
-              errs() << "\n";
+    // NF->print(errs());
+    //           errs() << "\n";
 // delete previous nodes.
       for (auto *call : mallocs)
       {

@@ -18,6 +18,7 @@
 #include "llvm/Transforms/Scalar/LoopDeletion.h"
 #include "llvm/Transforms/Scalar/LoopRotation.h"
 #include "llvm/Transforms/Scalar/LoopDistribute.h"
+#include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/TargetParser/Host.h"
@@ -27,7 +28,7 @@
 #include "llvm-c/Types.h"
 #include "llvm-c/BitWriter.h"
 #include "llvm-c/Transforms/PassBuilder.h"
-#include "rewriteStatepointForGC.cpp"
+// #include "rewriteStatepointForGC.cpp"
 #include "stripRelocationPass.cpp"
 
 namespace
