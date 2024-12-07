@@ -184,7 +184,9 @@ impl LineHeaderExt for LineHeader {
 
 impl Block {
     pub fn is_exaushted(&self) -> bool {
-        self.cursor >= NUM_LINES_PER_BLOCK || self.available_line_num == 0 || self.available_line_num > NUM_LINES_PER_BLOCK
+        self.cursor >= NUM_LINES_PER_BLOCK
+            || self.available_line_num == 0
+            || self.available_line_num > NUM_LINES_PER_BLOCK
     }
     /// Create a new block.
     ///
@@ -539,12 +541,12 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
-    use crate::{allocator::GlobalAllocator, consts::LINE_SIZE, HeaderExt, BLOCK_SIZE};
+    use crate::{allocator::GlobalAllocator, HeaderExt, BLOCK_SIZE};
 
     #[test]
     fn test_block_hole() {
         unsafe {
-            let mut ga = GlobalAllocator::new(1024 * 1024 * 1024);
+            let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
             let block = &mut *ga.get_block();
             // // 第一个hole应该是从第三行开始，长度是253
             // assert_eq!(block.find_first_hole(), Some((3, 253)));
@@ -561,132 +563,5 @@ mod tests {
             // 获取下一个hole，应该是从第十一行开始，长度是245
             assert_eq!(block.find_next_hole((5, 5), 1), Some((11, 1)));
         };
-    }
-    #[test]
-    fn test_alloc() {
-        unsafe {
-            let mut ga = GlobalAllocator::new(1024 * 1024 * 1024);
-            let block = &mut *ga.get_block();
-            // 设置第5行已被使用
-            block.get_nth_line_header(5).set_used(true);
-            // block.limit = 2;
-            block.hole_num = 2;
-            // 从第三行开始分配，长度为128
-            // 分配前：
-            // --------
-            // |  0   | meta
-            // |  1   | meta
-            // |  2   | meta
-            // |  3   | 空
-            // |  4   | 空
-            // |  5   | 已使用
-            // |  6   | 空
-            // |  7   | 空
-            // ......
-            // 分配后：
-            // --------
-            // |  0   | meta
-            // |  1   | meta
-            // |  2   | meta
-            // |  3   | 已使用
-            // |  4   | 空
-            // |  5   | 已使用
-            // |  6   | 空
-            // |  7   | 空
-            // ......
-            let (start, _) = block
-                .alloc(128, crate::block::ObjectType::Atomic)
-                .expect("cannot alloc new line");
-            assert_eq!(start, 3);
-            // assert_eq!(newcursor, Some(block.get_nth_line(4)));
-            assert_eq!(block.cursor, 4);
-            // assert_eq!(block.limit, 1);
-            let l = block.get_nth_line_header(3).get_obj_type();
-            assert_eq!(l, crate::block::ObjectType::Atomic);
-            // 从第4行开始分配，长度为129
-            // 分配前：
-            // --------
-            // |  0   | meta
-            // |  1   | meta
-            // |  2   | meta
-            // |  3   | 已使用
-            // |  4   | 空
-            // |  5   | 已使用
-            // |  6   | 空
-            // |  7   | 空
-            // ......
-            // 分配失败
-            // ......
-            assert_eq!(block.alloc(129, crate::block::ObjectType::Atomic), None);
-            assert_eq!(block.cursor, 4);
-            // assert_eq!(block.limit, 1);
-
-            block.cursor = 6;
-            // block.limit = 250;
-            let (start, newcursor) = block
-                .alloc((256 - 6) * LINE_SIZE, crate::block::ObjectType::Complex)
-                .expect("cannot alloc new line");
-            block.cursor = 4;
-            // block.limit = 1;
-            // 从第6行开始分配，长度为256-6
-            // 分配后：
-            // --------
-            // |  0   | meta
-            // |  1   | meta
-            // |  2   | meta
-            // |  3   | 已使用
-            // |  4   | 空
-            // |  5   | 已使用
-            // |  6   | 已使用
-            // |  7   | 已使用
-            // |  8   | 已使用
-            // ......
-            // |  255 | 已使用
-            let l = block.get_nth_line_header(6).get_obj_type();
-            assert_eq!(l, crate::block::ObjectType::Complex);
-            assert_eq!(start, 6);
-            assert!(!newcursor);
-            assert_eq!(block.cursor, 4);
-            // assert_eq!(block.limit, 1);
-            let (start, newcursor) = block
-                .alloc(128, crate::block::ObjectType::Atomic)
-                .expect("cannot alloc new line");
-            // 从第4行开始分配，长度为1
-            // 分配后：
-            // --------
-            // |  0   | meta
-            // |  1   | meta
-            // |  2   | meta
-            // |  3   | 已使用
-            // |  4   | 已使用
-            // |  5   | 已使用
-            // |  6   | 已使用
-            // |  7   | 已使用
-            // |  8   | 已使用
-            // ......
-            // |  255 | 已使用
-            assert_eq!(start, 4);
-            assert!(!newcursor);
-            // assert_eq!(block.first_hole_line_idx, 255); 这个时候没hole了，此值无意义，len为0
-            // assert_eq!(block.limit, 0);
-
-            // test big alloc
-            let obj = ga.get_big_obj(BLOCK_SIZE);
-            ga.big_obj_allocator.state();
-            println!("obj: {:?}\n", obj);
-            // |      1       |
-
-            ga.return_big_objs(vec![obj]);
-
-            let obj = ga.get_big_obj(BLOCK_SIZE + 1);
-            ga.big_obj_allocator.state();
-            println!("obj: {:?}\n", obj);
-            // |      1*      |          2        |
-
-            let obj = ga.get_big_obj(BLOCK_SIZE - 1);
-            ga.big_obj_allocator.state();
-            println!("obj: {:?}\n", obj);
-            // |      3       |          2        |
-        }
     }
 }

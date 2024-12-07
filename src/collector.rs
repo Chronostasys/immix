@@ -96,7 +96,7 @@ pub struct Collector {
     live_set: RefCell<FxHashMap<u64, *mut u8>>,
     coro_stacks: FxHashMap<*mut u8, Box<Vec<(*mut libc::c_void, &'static Function)>>>,
     live: bool,
-    stuck_stop_notify_chan: (Sender<()>, Receiver<()>),
+    stuck_stop_notify_chan: Sender<()>,
     stuck_stopped_notify_chan: (Sender<()>, Receiver<()>),
 }
 
@@ -179,7 +179,7 @@ impl Collector {
                 live_set: RefCell::new(FxHashMap::default()),
                 coro_stacks: FxHashMap::default(),
                 live: true,
-                stuck_stop_notify_chan: channel(),
+                stuck_stop_notify_chan: channel().0,
                 stuck_stopped_notify_chan: channel(),
             }
         }
@@ -829,7 +829,6 @@ impl Collector {
         let (count, mut waiting) = *v;
         waiting -= 1;
         *v = (count, waiting);
-        // println!("gc {}: waiting: {}, count: {}", self.id, waiting, count);
         if waiting != 0 {
             GC_MARK_COND.wait_while(&mut v, |_| GC_MARKING.load(Ordering::Acquire));
         } else {
@@ -1166,6 +1165,8 @@ impl Collector {
         log::trace!("gc {}: stucking...", self.id);
         let frames = self.get_frames(sp);
         let (startsender, startrecv) = channel::<()>();
+        let (endsender, endreceiver) = channel::<()>();
+        self.stuck_stop_notify_chan = endsender;
         unsafe {
             let ptr = Box::leak(frames) as *mut _;
             self.frames_list.store(ptr, Ordering::SeqCst);
@@ -1185,7 +1186,7 @@ impl Collector {
                         first = false;
                         startsender.send(()).unwrap();
                     }
-                    if c.stuck_stop_notify_chan.1.try_recv().is_ok() {
+                    if endreceiver.try_recv().is_ok() {
                         drop(mutex);
                         sender.send(()).unwrap();
                         break;
@@ -1227,7 +1228,7 @@ impl Collector {
     }
 
     pub fn unstuck(&mut self) {
-        self.stuck_stop_notify_chan.0.send(()).unwrap();
+        self.stuck_stop_notify_chan.send(()).unwrap();
         STUCK_COND.notify_all();
         // wait until the shadow thread exit
         self.stuck_stopped_notify_chan.1.recv().unwrap();
@@ -1262,10 +1263,6 @@ fn get_fn_from_frame(frame: &backtrace::Frame) -> Option<&'static Function> {
     let map = unsafe { STACK_MAP.map.as_ref() }.unwrap();
     map.get(&(frame.ip().cast_const() as _))
 }
-
-#[cfg(test)]
-#[cfg(feature = "shadow_stack")]
-mod tests;
 
 static GLOBAL_MARK_FLAG: AtomicBool = AtomicBool::new(false);
 

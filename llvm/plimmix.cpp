@@ -204,18 +204,21 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
     case 0:
         O = OptimizationLevel::O0;
         MPM.addPass(PB.buildO0DefaultPipeline(O));
+        MPM.addPass(EscapePass(print_escaped == 1, true));
         break;
     case 1:
         O = OptimizationLevel::O1;
         MPM.addPass(PB.buildPerModuleDefaultPipeline(O));
         FPM = PB.buildFunctionSimplificationPipeline(O, ThinOrFullLTOPhase::None);
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+        MPM.addPass(EscapePass(print_escaped == 1, true));
         break;
     case 2:
         O = OptimizationLevel::O2;
         MPM.addPass(PB.buildPerModuleDefaultPipeline(O));
         FPM = PB.buildFunctionSimplificationPipeline(O, ThinOrFullLTOPhase::None);
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+        MPM.addPass(EscapePass(print_escaped == 1, true));
         break;
     case 3:
         O = OptimizationLevel::O3;
@@ -236,6 +239,7 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
         MPM.addPass(PB.buildPerModuleDefaultPipeline(O));
         FPM = PB.buildFunctionSimplificationPipeline(O, ThinOrFullLTOPhase::None);
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+        MPM.addPass(EscapePass(print_escaped == 1, true));
         break;
     }
     MPM.addPass(RewriteStatepointsForGC());
