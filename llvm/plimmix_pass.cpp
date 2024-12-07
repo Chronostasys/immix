@@ -155,7 +155,7 @@ namespace
 
   public:
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
-    void correctPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, llvm::IRBuilder<> &builder, llvm::Module &M, std::__1::vector<llvm::PHINode *> &phis);
+    void correctPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, llvm::IRBuilder<> &builder, llvm::Module &M, std::vector<llvm::PHINode *> &phis);
     void hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip, int level);
     void replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls);
     /*
