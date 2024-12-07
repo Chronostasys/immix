@@ -3,7 +3,9 @@ use std::{cell::Cell, collections::VecDeque};
 use parking_lot::{Mutex, ReentrantMutex};
 use threadpool::ThreadPool;
 
-use crate::{bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, NUM_LINES_PER_BLOCK};
+use crate::{
+    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, NUM_LINES_PER_BLOCK,
+};
 
 use super::big_obj_allocator::BigObjAllocator;
 
@@ -73,12 +75,12 @@ impl GlobalAllocator {
         // mmap.commit(mmap.aligned(), BLOCK_SIZE);
         // let n_workers = available_parallelism().unwrap().get();
         let start = mmap.aligned(BLOCK_SIZE);
-        let end = mmap.end();
+        let end = round_n_down!(mmap.end() as usize, BLOCK_SIZE) as *mut u8;
 
         // bytemap is only for immix space
         let immix_size = end as usize - start as usize;
         // we use one byte per block to avoid using lock
-        let bytemap_size = immix_size / BLOCK_SIZE + 1;
+        let bytemap_size = immix_size / BLOCK_SIZE;
         let block_bytemap: *mut u8 = unsafe { libc::malloc(bytemap_size) } as *mut u8;
         Self {
             current: Cell::new(mmap.aligned(BLOCK_SIZE)),
@@ -157,19 +159,10 @@ impl GlobalAllocator {
         let heap_end = self.heap_end;
         self.current
             .set(unsafe { self.current.get().add(BLOCK_SIZE) });
-        if unsafe { current.add(BLOCK_SIZE) } >= heap_end {
+        if unsafe { current.add(BLOCK_SIZE) } > heap_end {
             return None;
         }
-        if (self.current.get() as usize - self.heap_start as usize) / BLOCK_SIZE % 32 == 0 {
-            self.mmap.commit(
-                current,
-                if heap_end as usize - current as usize > BLOCK_SIZE * 32 {
-                    BLOCK_SIZE * 32
-                } else {
-                    heap_end as usize - current as usize
-                },
-            );
-        }
+        self.mmap.commit(current, BLOCK_SIZE);
 
         let block = Block::new(current);
 

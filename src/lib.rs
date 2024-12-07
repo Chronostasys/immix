@@ -251,7 +251,7 @@ pub fn gc_collect_fast_unwind(sp: *mut u8) {
 pub fn gc_add_root(root: *mut u8, obj_type: u8) {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = unsafe { gc.get().as_mut().unwrap() };
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.add_root(root, ObjectType::from_int(obj_type).unwrap());
         // println!("add_root")
     })
@@ -288,7 +288,7 @@ pub fn gc_rm_live(handle: u64) {
 pub fn gc_remove_root(root: *mut u8) {
     SPACE.with(|gc| {
         // println!("start remove_root");
-        let mut gc = unsafe { gc.get().as_mut().unwrap() };
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.remove_root(root);
         // println!("remove_root")
     })

@@ -615,7 +615,7 @@ namespace
           }
           auto *tyValue = dyn_cast<ConstantInt>(ty);
           auto tyInt = tyValue->getZExtValue();
-          if (!attrs.hasRetAttr("pl_ordinary") && tyInt != 0)
+          if (!attrs.hasRetAttr("pl_ordinary"))
           {
             return false;
           }
