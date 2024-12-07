@@ -179,7 +179,7 @@ fn test_complecated_multiple_thread_gc(num_iter: usize, threads: usize) -> Durat
 
 fn bench_allocation() -> *mut GCTestObj {
     SPACE.with(|gc| {
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         gc.alloc(size_of::<GCTestObj>(), ObjectType::Complex) as *mut GCTestObj
     })
 }

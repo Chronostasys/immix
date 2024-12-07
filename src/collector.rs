@@ -1,6 +1,6 @@
 #![allow(clippy::box_collection)]
 use std::{
-    cell::RefCell,
+    cell::{RefCell, UnsafeCell},
     cmp::min,
     sync::{
         atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
@@ -82,8 +82,10 @@ fn walk_gc_frames(sp: *mut u8, mut walker: impl FnMut(*mut u8, *mut u8, &'static
 /// * `id` - collector id
 /// * `mark_histogram` - mark histogram
 /// * `status` - collector status
+#[repr(C)]
 pub struct Collector {
     thread_local_allocator: *mut ThreadLocalAllocator,
+    bytes_allocated_since_last_gc: UnsafeCell<usize>,
     #[cfg(feature = "shadow_stack")]
     roots: rustc_hash::FxHashMap<*mut u8, ObjectType>,
     queue: *mut Vec<(*mut u8, ObjectType)>,
@@ -101,8 +103,6 @@ pub struct Collector {
 struct CollectorStatus {
     /// in bytes
     collect_threshold: usize,
-    /// in bytes
-    bytes_allocated_since_last_gc: usize,
     /// in bytes
     last_gc_remaining: usize,
     collecting: bool,
@@ -162,14 +162,14 @@ impl Collector {
             memqueue.write(queue);
             Self {
                 thread_local_allocator: mem,
+                bytes_allocated_since_last_gc: UnsafeCell::new(0),
                 #[cfg(feature = "shadow_stack")]
                 roots: rustc_hash::FxHashMap::default(),
                 id,
                 mark_histogram: memvecmap,
                 queue: memqueue,
                 status: RefCell::new(CollectorStatus {
-                    collect_threshold: 1024 * 1024 * 10,
-                    bytes_allocated_since_last_gc: 0,
+                    collect_threshold: 1024 * 1024,
                     collecting: false,
                     last_gc_remaining: 0,
                     total_stuck_time: Duration::default(),
@@ -234,8 +234,10 @@ impl Collector {
         }
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
-            let mut status = self.status.borrow_mut();
-            status.bytes_allocated_since_last_gc += ((size - 1) / LINE_SIZE + 1) * LINE_SIZE;
+            unsafe {
+                (*self.bytes_allocated_since_last_gc.get()) +=
+                    ((size - 1) / LINE_SIZE + 1) * LINE_SIZE;
+            }
         }
         let ptr = self.alloc_no_collect(size, obj_type);
         if ptr.is_null() {
@@ -257,7 +259,8 @@ impl Collector {
             return;
         }
         let mut status = self.status.borrow_mut();
-        if (status.bytes_allocated_since_last_gc + status.last_gc_remaining * REMAIN_MULTIPLIER
+        if (unsafe { *self.bytes_allocated_since_last_gc.get() }
+            + status.last_gc_remaining * REMAIN_MULTIPLIER
             >= status.collect_threshold)
             || (unsafe {
                 self.thread_local_allocator
@@ -297,9 +300,9 @@ impl Collector {
             return std::ptr::null_mut();
         }
         unsafe {
-            let mut status = self.status.borrow_mut();
-            status.bytes_allocated_since_last_gc += ((size - 1) / LINE_SIZE + 1) * LINE_SIZE;
-            drop(status);
+            // let mut status = self.status.borrow_mut();
+            *self.bytes_allocated_since_last_gc.get() += ((size - 1) / LINE_SIZE + 1) * LINE_SIZE;
+            // drop(status);
             let ptr = self
                 .thread_local_allocator
                 .as_mut()
@@ -402,7 +405,7 @@ impl Collector {
     extern "C" fn mark_ptr_callback(ptr: *mut u8, _tp: *mut u8) {
         unsafe {
             crate::SPACE.with(|gc| {
-                gc.borrow().mark_ptr(ptr);
+                gc.get().as_ref().unwrap_unchecked().mark_ptr(ptr);
             });
         }
     }
@@ -530,6 +533,7 @@ impl Collector {
                     (*atomic_ptr).store(new_ptr, Ordering::SeqCst);
                     // eprintln!("gc {}: eva {:p} to {:p}", self.id, head, new_ptr);
                     log::trace!("gc {}: eva {:p} to {:p}", self.id, head, new_ptr);
+                    debug_assert!(!new_line_header.get_marked());
                     debug_assert!(!new_line_header.get_forwarded());
                     new_line_header.set_marked(true);
                     new_block.marked = true;
@@ -959,7 +963,7 @@ impl Collector {
         let previous_threshold = self.status.borrow().collect_threshold;
         // let previous_remaining = self.status.borrow().last_gc_remaining;
         let remaining = used.0;
-        let this = self.status.borrow().bytes_allocated_since_last_gc;
+        let this = unsafe { *self.bytes_allocated_since_last_gc.get() };
         if this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
             && self.status.borrow().am_i_triggered
         {
@@ -974,7 +978,7 @@ impl Collector {
         //     self.status.borrow_mut().collect_threshold =
         //         (previous_threshold as f64 * SHRINK_PROPORTION) as usize;
         // }
-        self.status.borrow_mut().bytes_allocated_since_last_gc = 0;
+        unsafe { *self.bytes_allocated_since_last_gc.get() = 0 };
         self.status.borrow_mut().last_gc_remaining = remaining;
         self.status.borrow_mut().am_i_triggered = false;
 

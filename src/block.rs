@@ -56,22 +56,23 @@ pub trait LineHeaderExt {
 /// A block is divided into 256 lines, each line is 128 bytes.
 ///
 /// **the leading 3 lines are reserved for metadata.**
+#[repr(C)]
 pub struct Block {
+    /// 第一个hole的起始行号
+    cursor: usize,
+    next_hole_size: usize,
+    available_line_num: usize,
     /// |                           LINE HEADER(1 byte)                         |
     /// |    7   |    6   |    5   |    4   |    3   |    2   |    1   |    0   |
     /// | is head|   eva  |  evaed |        object type       | marked |  used  |
     ///
     /// When the evaed bit is set and eva is not, the line is pinned.
     line_map: [LineHeader; NUM_LINES_PER_BLOCK],
-    /// 第一个hole的起始行号
-    cursor: usize,
     /// 是否被标记
     pub marked: bool,
     /// 洞的数量
     hole_num: usize,
-    available_line_num: usize,
     eva_target: bool,
-    next_hole_size: usize,
 }
 
 impl HeaderExt for u8 {
@@ -182,6 +183,9 @@ impl LineHeaderExt for LineHeader {
 }
 
 impl Block {
+    pub fn is_exaushted(&self) -> bool {
+        self.cursor >= NUM_LINES_PER_BLOCK || self.available_line_num == 0 || self.available_line_num > NUM_LINES_PER_BLOCK
+    }
     /// Create a new block.
     ///
     /// at must be a `BLOCK_SIZE` aligned pointer.

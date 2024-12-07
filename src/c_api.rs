@@ -1,6 +1,6 @@
 use std::process::exit;
 
-use crate::{gc_malloc_fast_unwind, gc_malloc_no_collect};
+use crate::{gc_malloc_fast_unwind, gc_malloc_fast_unwind_ex, gc_malloc_no_collect, Collector};
 use backtrace::Backtrace;
 use log::trace;
 
@@ -103,8 +103,18 @@ pub unsafe extern "C" fn DioGC__register_global(p: *mut u8, tp: u8) {
     DioGC::register_global(p, tp)
 }
 #[no_mangle]
-pub unsafe extern "C" fn DioGC__malloc(size: u64, obj_type: u8, rsp: *mut *mut u8) -> *mut u8 {
+pub unsafe extern "C" fn DioGC__malloc_old(size: u64, obj_type: u8, rsp: *mut *mut u8) -> *mut u8 {
     DioGC::malloc(size, obj_type, rsp)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn DioGC__malloc_slowpath(
+    size: u64,
+    obj_type: u8,
+    rsp: *mut *mut u8,
+    space: *mut *mut Collector,
+) -> *mut u8 {
+    gc_malloc_fast_unwind_ex(space, size as _, obj_type, rsp as _)
 }
 
 #[no_mangle]

@@ -1,7 +1,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::missing_safety_doc)]
 use std::{
-    cell::RefCell,
+    cell::UnsafeCell,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -37,10 +37,10 @@ use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
 
 thread_local! {
-    pub static SPACE: RefCell<Collector> = unsafe {
+    pub static SPACE: UnsafeCell<Collector> = unsafe {
         // gc运行中的时候不能增加线程
         let gc = Collector::new(GLOBAL_ALLOCATOR.0.as_mut().unwrap());
-        RefCell::new(gc)
+        UnsafeCell::new(gc)
     };
 }
 
@@ -120,7 +120,7 @@ lazy_static! {
 pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
     SPACE.with(|gc| {
         // println!("start malloc");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         // println!("malloc");
         gc.alloc(size, ObjectType::from_int(obj_type).unwrap())
     })
@@ -128,7 +128,7 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
 
 pub fn print_block_time() {
     SPACE.with(|gc| {
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         let duration = gc.gc_stw_duration();
         println!("gc stw duration: {:?}", duration);
     })
@@ -146,10 +146,41 @@ pub fn print_block_time() {
 pub fn gc_malloc_fast_unwind(size: usize, obj_type: u8, sp: *mut u8) -> *mut u8 {
     SPACE.with(|gc| {
         // println!("start malloc");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         // println!("malloc");
         gc.alloc_fast_unwind(size, ObjectType::from_int(obj_type).unwrap(), sp)
     })
+}
+
+pub fn gc_malloc_fast_unwind_ex(
+    space: *mut *mut Collector,
+    size: usize,
+    obj_type: u8,
+    sp: *mut u8,
+) -> *mut u8 {
+    // gc_malloc_fast_unwind(size, obj_type, sp)
+    if unsafe { *space }.is_null() {
+        SPACE.with(|gc1| {
+            let gc = gc1.get();
+            unsafe { *space = gc }
+            // eprintln!("space setted {:p}", gc);
+            let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
+                size,
+                ObjectType::from_int(obj_type).unwrap(),
+                sp,
+            );
+            re
+        })
+    } else {
+        let gc = unsafe { *space };
+        // eprintln!("space get {:p}", gc);
+        let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
+            size,
+            ObjectType::from_int(obj_type).unwrap(),
+            sp,
+        );
+        re
+    }
 }
 
 /// # gc_malloc_no_collect
@@ -159,7 +190,7 @@ pub fn gc_malloc_fast_unwind(size: usize, obj_type: u8, sp: *mut u8) -> *mut u8 
 pub fn gc_malloc_no_collect(size: usize, obj_type: u8) -> *mut u8 {
     SPACE.with(|gc| {
         // println!("start malloc");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         // println!("malloc");
         gc.alloc_no_collect(size, ObjectType::from_int(obj_type).unwrap())
     })
@@ -195,7 +226,7 @@ pub fn gc_register_finalizer(obj: *mut u8, arg: *mut u8, f: fn(*mut u8)) {
 pub fn gc_collect() {
     SPACE.with(|gc| {
         // println!("start collect");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         gc.collect();
         // println!("collect")
     })
@@ -210,7 +241,7 @@ pub fn gc_collect() {
 pub fn gc_collect_fast_unwind(sp: *mut u8) {
     SPACE.with(|gc| {
         // println!("start collect");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         gc.collect_fast_unwind(sp);
         // println!("collect")
     })
@@ -220,7 +251,7 @@ pub fn gc_collect_fast_unwind(sp: *mut u8) {
 pub fn gc_add_root(root: *mut u8, obj_type: u8) {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = gc.borrow_mut();
+        let mut gc = unsafe { gc.get().as_mut().unwrap() };
         gc.add_root(root, ObjectType::from_int(obj_type).unwrap());
         // println!("add_root")
     })
@@ -229,7 +260,7 @@ pub fn gc_add_root(root: *mut u8, obj_type: u8) {
 pub fn gc_keep_live(gc_ptr: *mut u8) -> u64 {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         gc.keep_live(gc_ptr)
         // println!("add_root")
     })
@@ -238,7 +269,7 @@ pub fn gc_keep_live(gc_ptr: *mut u8) -> u64 {
 pub fn gc_keep_live_pinned(gc_ptr: *mut u8) -> u64 {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         gc.keep_live_pinned(gc_ptr)
         // println!("add_root")
     })
@@ -247,7 +278,7 @@ pub fn gc_keep_live_pinned(gc_ptr: *mut u8) -> u64 {
 pub fn gc_rm_live(handle: u64) {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let gc = gc.borrow();
+        let gc = unsafe { gc.get().as_ref().unwrap() };
         gc.rm_live(handle);
         // println!("add_root")
     })
@@ -257,7 +288,7 @@ pub fn gc_rm_live(handle: u64) {
 pub fn gc_remove_root(root: *mut u8) {
     SPACE.with(|gc| {
         // println!("start remove_root");
-        let mut gc = gc.borrow_mut();
+        let mut gc = unsafe { gc.get().as_mut().unwrap() };
         gc.remove_root(root);
         // println!("remove_root")
     })
@@ -270,19 +301,19 @@ pub fn gc_is_auto_collect_enabled() -> bool {
 
 pub fn no_gc_thread() {
     SPACE.with(|gc| {
-        gc.borrow_mut().unregister_current_thread();
+        unsafe { gc.get().as_mut().unwrap() }.unregister_current_thread();
     })
 }
 
 pub fn safepoint() {
     SPACE.with(|gc| {
-        gc.borrow().safepoint();
+        unsafe { gc.get().as_ref().unwrap() }.safepoint();
     })
 }
 
 pub fn safepoint_fast_unwind(sp: *mut u8) {
     SPACE.with(|gc| {
-        gc.borrow().safepoint_fast_unwind(sp);
+        unsafe { gc.get().as_ref().unwrap() }.safepoint_fast_unwind(sp);
     })
 }
 
@@ -312,7 +343,7 @@ pub fn thread_stuck_start() {
     // v.0 -= 1;
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = gc.borrow_mut();
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.stuck()
         // println!("add_root")
     });
@@ -322,7 +353,7 @@ pub fn thread_stuck_start_fast(sp: *mut u8) {
     // v.0 -= 1;
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = gc.borrow_mut();
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.stuck_fast_unwind(sp)
         // println!("add_root")
     });
@@ -337,7 +368,7 @@ pub fn thread_stuck_end() {
     // v.0 += 1;
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = gc.borrow_mut();
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.unstuck()
         // println!("add_root")
     });
@@ -346,7 +377,7 @@ pub fn thread_stuck_end() {
 pub fn add_coro_stack(sp: *mut u8, stack: *mut u8) {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = gc.borrow_mut();
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.add_coro_stack(sp, stack)
         // println!("add_root")
     });
@@ -355,7 +386,7 @@ pub fn add_coro_stack(sp: *mut u8, stack: *mut u8) {
 pub fn remove_coro_stack(stack: *mut u8) {
     SPACE.with(|gc| {
         // println!("start add_root");
-        let mut gc = gc.borrow_mut();
+        let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.remove_coro_stack(stack)
         // println!("add_root")
     });

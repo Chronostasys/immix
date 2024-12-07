@@ -281,6 +281,7 @@ extern "C" {
     pub fn RunExpr(module: *mut u8) -> std::ffi::c_void;
 
     pub fn parse_ir(ir: *const std::ffi::c_char) -> *mut u8;
+    pub fn parse_ir_string(ir: *const std::ffi::c_char) -> *mut u8;
     /// # run_module_pass
     ///
     /// run the module pass

@@ -160,18 +160,16 @@ impl GlobalAllocator {
         if unsafe { current.add(BLOCK_SIZE) } >= heap_end {
             return None;
         }
-        if !self.mmap.commit(current, BLOCK_SIZE) {
-            self.current
-                .set(unsafe { self.current.get().sub(BLOCK_SIZE) });
-            return None;
+        if (self.current.get() as usize - self.heap_start as usize) / BLOCK_SIZE % 32 == 0 {
+            self.mmap.commit(
+                current,
+                if heap_end as usize - current as usize > BLOCK_SIZE * 32 {
+                    BLOCK_SIZE * 32
+                } else {
+                    heap_end as usize - current as usize
+                },
+            );
         }
-
-        // if unsafe { current.add(BLOCK_SIZE * 32) } >= heap_end {
-        //     return None;
-        // }
-        // if (self.current as usize - self.heap_start as usize) / BLOCK_SIZE % 32 == 0 {
-        //     self.mmap.commit(current, BLOCK_SIZE * 32);
-        // }
 
         let block = Block::new(current);
 
@@ -218,7 +216,7 @@ impl GlobalAllocator {
         //     (*b).reset_header();
         // }
         // return b;
-        let _lock = self.lock.lock();
+        let lock = self.lock.lock();
         self.mem_usage_flag += 1;
         let block = if let Some((block, freed)) = self.free_blocks.pop() {
             if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
@@ -232,11 +230,7 @@ impl GlobalAllocator {
         if block.is_null() {
             return block;
         }
-        unsafe {
-            #[cfg(feature = "zero_init")]
-            core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
-            (*block).reset_header();
-        }
+        self.set_block_bitmap(block, true);
         let now = std::time::Instant::now();
         // 距离上次alloc时间超过1秒，检查是否需要把free_blocks中的block都dont need
         if now.duration_since(self.last_get_block_time).as_millis() > ROUND_MIN_TIME_MILLIS {
@@ -264,7 +258,12 @@ impl GlobalAllocator {
                 self.round = 0;
             }
         }
-        self.set_block_bitmap(block, true);
+        drop(lock);
+        unsafe {
+            #[cfg(feature = "zero_init")]
+            core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
+            (*block).reset_header();
+        }
         block
     }
 

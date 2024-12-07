@@ -235,22 +235,23 @@ namespace
                 if (auto *F = call->getCalledFunction())
                 {
                   auto attrs = call->getAttributes();
-                  if (!F->getName().equals("DioGC__malloc"))
+                  if (!F->getName().equals("DioGC__malloc") && !F->getName().equals("DioGC__malloc_slowpath"))
                   {
                     continue;
                   }
-                  auto * ty = call->getArgOperand(1);
-                  if (!isa<ConstantInt>(ty) || !detail::isPresent(ty))
-                  {
-                    // if the size is not a constant, we can't replace it with alloca
-                    continue;
-                  }
-                  auto *tyValue = dyn_cast<ConstantInt>(ty);
-                  auto tyInt = tyValue->getZExtValue();
-                  if (!attrs.hasRetAttr("pl_ordinary") && tyInt != 0)
-                  {
-                    continue;
-                  }
+                  // FIXME: why?
+                  // auto * ty = call->getArgOperand(1);
+                  // if (!isa<ConstantInt>(ty) || !detail::isPresent(ty))
+                  // {
+                  //   // if the size is not a constant, we can't replace it with alloca
+                  //   continue;
+                  // }
+                  // auto *tyValue = dyn_cast<ConstantInt>(ty);
+                  // auto tyInt = tyValue->getZExtValue();
+                  // if (!attrs.hasRetAttr("pl_ordinary") && tyInt != 0)
+                  // {
+                  //   continue;
+                  // }
 
                   if (!PointerMayBeCaptured(call, true, false))
                   {
@@ -422,6 +423,20 @@ namespace
         }
       }
     }
+    
+    if (this->check_phi)
+    {
+      // remove DioGC__malloc's attributes noinline and optnone
+      auto f = M.getFunction("DioGC__malloc");
+      if (f)
+      {
+        f->removeFnAttr(Attribute::NoInline);
+        f->removeFnAttr(Attribute::OptimizeNone);
+        // all always inline
+        f->addFnAttr(Attribute::AlwaysInline);
+      }
+    }
+    
     return PreservedAnalyses::none();
   }
 
@@ -571,7 +586,7 @@ namespace
         // {
         //   return false;
         // }
-        if (!F->getName().equals("DioGC__malloc"))
+        if (!F->getName().equals("DioGC__malloc") && !F->getName().equals("DioGC__malloc_slowpath"))
         {
           return false;
         }

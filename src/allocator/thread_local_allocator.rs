@@ -34,7 +34,9 @@ use super::GlobalAllocator;
 /// * `current_block` - current block
 /// * `recyclable_blocks` - recyclable blocks
 /// * `lock` - lock
+#[repr(C)]
 pub struct ThreadLocalAllocator {
+    curr_block: *mut Block,
     global_allocator: *mut GlobalAllocator,
     unavailable_blocks: Vec<*mut Block>,
     recyclable_blocks: VecDeque<*mut Block>,
@@ -79,6 +81,7 @@ impl ThreadLocalAllocator {
             eva_blocks: Vec::new(),
             big_objs: Vec::new(),
             collect_mode: false,
+            curr_block: std::ptr::null_mut(),
         }
     }
 
@@ -236,20 +239,13 @@ impl ThreadLocalAllocator {
             if block.is_null() {
                 return std::ptr::null_mut();
             }
-            unsafe {
-                let (s, nxt) = (*block).alloc(size, obj_type).unwrap_unchecked();
-                let re = (*block).get_nth_line(s);
-                if !nxt {
-                    self.unavailable_blocks.push(block);
-                } else {
-                    self.recyclable_blocks.push_back(block);
-                }
-                return re;
-            }
+            debug_assert!(!unsafe { block.as_ref().unwrap() }.is_eva_candidate());
+            self.curr_block = block;
+            self.recyclable_blocks.push_back(block);
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
         unsafe {
-            while (**f).is_eva_candidate() {
+            while (**f).is_eva_candidate() || (**f).is_exaushted() {
                 let uf = self.recyclable_blocks.pop_front().unwrap_unchecked();
                 self.unavailable_blocks.push(uf);
                 let ff = self.recyclable_blocks.front();
@@ -260,6 +256,7 @@ impl ThreadLocalAllocator {
                 }
             }
         }
+        debug_assert!(!unsafe { f.as_ref().unwrap() }.is_eva_candidate());
         let res = unsafe { (**f).alloc(size, obj_type) };
         // return std::ptr::null_mut();
         if res.is_none() {
@@ -272,6 +269,7 @@ impl ThreadLocalAllocator {
             return self.overflow_alloc(size, obj_type);
         }
         let (s, nxt) = res.unwrap();
+        self.curr_block = *f as _;
         let re = unsafe { (**f).get_nth_line(s) };
         if !nxt {
             // 当前block被用完，将它从recyclable blocks中移除，加入unavailable blocks
@@ -299,6 +297,8 @@ impl ThreadLocalAllocator {
         if new_block.is_null() {
             return std::ptr::null_mut();
         }
+        debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
+        self.curr_block = new_block;
         // alloc
         let (s, nxt) = unsafe { (*new_block).alloc(size, obj_type).unwrap() };
         let re = unsafe { (*new_block).get_nth_line(s) };
