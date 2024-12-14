@@ -8,13 +8,11 @@
 
 use std::collections::VecDeque;
 
+use crossbeam_deque::Stealer;
 use rustc_hash::FxHashMap;
 
 use crate::{
-    bigobj::BigObj,
-    block::{Block, ObjectType},
-    consts::{BLOCK_SIZE, LINE_SIZE},
-    HeaderExt, EVA_BLOCK_PROPORTION, NUM_LINES_PER_BLOCK,
+    bigobj::BigObj, block::{Block, ObjectType}, consts::{BLOCK_SIZE, LINE_SIZE}, count_holes, HeaderExt, EVA_BLOCK_PROPORTION, NUM_LINES_PER_BLOCK
 };
 
 use super::GlobalAllocator;
@@ -40,9 +38,9 @@ pub struct ThreadLocalAllocator {
     global_allocator: *mut GlobalAllocator,
     unavailable_blocks: Vec<*mut Block>,
     recyclable_blocks: VecDeque<*mut Block>,
-    big_objs: Vec<*mut BigObj>,
     eva_blocks: Vec<*mut Block>,
     collect_mode: bool,
+    block_stealer: Stealer<(*mut Block, bool)>
 }
 
 impl Drop for ThreadLocalAllocator {
@@ -79,9 +77,9 @@ impl ThreadLocalAllocator {
             unavailable_blocks: Vec::new(),
             recyclable_blocks: VecDeque::new(),
             eva_blocks: Vec::new(),
-            big_objs: Vec::new(),
             collect_mode: false,
             curr_block: std::ptr::null_mut(),
+            block_stealer: unsafe{global_allocator.as_mut().unwrap_unchecked().block_stealer()}
         }
     }
 
@@ -147,7 +145,6 @@ impl ThreadLocalAllocator {
         let mut total_available = 0;
         self.recyclable_blocks
             .iter()
-            .chain(self.unavailable_blocks.iter())
             .for_each(|block| unsafe {
                 let (available, holes) = (**block).get_available_line_num_and_holes();
                 if let Some(v) = histogram.get_mut(&holes) {
@@ -200,16 +197,9 @@ impl ThreadLocalAllocator {
         size
     }
 
-    pub fn get_bigobjs_size(&self) -> usize {
-        let mut size = 0;
-        for bigobj in &self.big_objs {
-            size += unsafe { (**bigobj).get_size() };
-        }
-        size
-    }
 
     pub fn should_gc(&self) -> bool {
-        unsafe { self.recyclable_blocks.is_empty() && (*self.global_allocator).should_gc() }
+        unsafe { self.recyclable_blocks.is_empty() && (*self.global_allocator).should_gc() && self.block_stealer.is_empty() }
     }
 
     /// # alloc
@@ -232,6 +222,15 @@ impl ThreadLocalAllocator {
         if size > ((BLOCK_SIZE / LINE_SIZE - 3) / 4 - 1) * LINE_SIZE {
             return self.big_obj_alloc(size, obj_type);
         }
+        let re = self.normal_alloc(size, obj_type);
+        self.curr_block = unsafe{Block::from_obj_ptr(re)};
+        // unsafe{
+        //     debug_assert!((*self.curr_block).get_available_line_num_and_holes().1 == (*self.curr_block).count_holes());
+        // }
+        re
+    }
+
+    fn normal_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
         // mid size object & small size object
         // 刚启动或者recycle block全用光了
         if self.recyclable_blocks.is_empty() {
@@ -240,7 +239,6 @@ impl ThreadLocalAllocator {
                 return std::ptr::null_mut();
             }
             debug_assert!(!unsafe { block.as_ref().unwrap() }.is_eva_candidate());
-            self.curr_block = block;
             self.recyclable_blocks.push_back(block);
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
@@ -252,7 +250,7 @@ impl ThreadLocalAllocator {
                 if let Some(ff) = ff {
                     f = ff;
                 } else {
-                    return self.alloc(size, obj_type);
+                    return self.normal_alloc(size, obj_type);
                 }
             }
         }
@@ -269,7 +267,6 @@ impl ThreadLocalAllocator {
             return self.overflow_alloc(size, obj_type);
         }
         let (s, nxt) = res.unwrap();
-        self.curr_block = *f as _;
         let re = unsafe { (**f).get_nth_line(s) };
         if !nxt {
             // 当前block被用完，将它从recyclable blocks中移除，加入unavailable blocks
@@ -298,7 +295,6 @@ impl ThreadLocalAllocator {
             return std::ptr::null_mut();
         }
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
-        self.curr_block = new_block;
         // alloc
         let (s, nxt) = unsafe { (*new_block).alloc(size, obj_type).unwrap() };
         let re = unsafe { (*new_block).get_nth_line(s) };
@@ -328,20 +324,12 @@ impl ThreadLocalAllocator {
     pub fn big_obj_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
         let obj = unsafe { (*self.global_allocator).get_big_obj(size) };
         unsafe { (*obj).header.set_obj_type(obj_type) };
-        self.big_objs.push(obj);
+        unsafe { (*obj).header.set_used(true) };
         unsafe { (obj as *mut u8).add(16) }
     }
 
     pub fn big_obj_from_ptr(&mut self, ptr: *mut u8) -> Option<*mut BigObj> {
-        for obj in self.big_objs.iter() {
-            // FIXME: O(n); should use a tree
-            let start = unsafe { (*obj as *mut u8).add(16) };
-            let end = unsafe { (*obj as *mut u8).add((*(*obj)).size) };
-            if start <= ptr && end >= ptr {
-                return Some(*obj);
-            }
-        }
-        None
+        unsafe{self.global_allocator.as_mut().unwrap_unchecked().big_obj_from_ptr(ptr)}
     }
 
     /// # get_new_block
@@ -355,7 +343,7 @@ impl ThreadLocalAllocator {
         let b = if self.collect_mode && !self.eva_blocks.is_empty() {
             self.eva_blocks.pop().unwrap()
         } else {
-            unsafe { (*self.global_allocator).get_block() }
+            unsafe { (*self.global_allocator).get_block(&self.block_stealer) }
         };
 
         unsafe { b.as_mut().map(|b| b.set_eva_threshold(NUM_LINES_PER_BLOCK)) };
@@ -428,6 +416,7 @@ impl ThreadLocalAllocator {
             let less = head_room_size - self.eva_blocks.len();
             for _ in 0..less {
                 if let Some(block) = free_blocks.pop() {
+                    unsafe{block.as_mut().unwrap_unchecked().reset_header()};
                     self.eva_blocks.push(block);
                 } else {
                     break;
@@ -437,20 +426,16 @@ impl ThreadLocalAllocator {
         unsafe {
             (*self.global_allocator).return_blocks(free_blocks);
         }
-        let mut big_objs = Vec::new();
-        for obj in self.big_objs.iter() {
-            if unsafe { (*(*obj)).header.get_marked() } {
-                big_objs.push(*obj);
-            } else {
-                unsafe {
-                    (*self.global_allocator).return_big_objs([*obj]);
-                }
-            }
-            unsafe {
-                (*(*obj)).header &= !0b10;
-            }
+
+
+        let curr  = self.recyclable_blocks.front().cloned();
+        if curr.is_none() {
+            self.curr_block = self.get_new_block();
+            self.recyclable_blocks.push_back(self.curr_block);
+        } else {
+            self.curr_block = unsafe{curr.unwrap_unchecked()};
         }
-        self.big_objs = big_objs;
+        
         let used_lines = total_used * LINE_SIZE;
         (used_lines, free_lines * LINE_SIZE)
     }

@@ -105,6 +105,7 @@ impl BigObjAllocator {
     pub fn return_chunk(&mut self, obj: *mut BigObj) {
         let _lock = self.lock.lock();
         let size = unsafe { (*obj).size };
+        // eprintln!("ret_chunk: {:p}[size {}]", obj, size);
         log::trace!("ret_chunk: {:p}[size {}]", obj, size);
         let mut merged = false;
         // 合并相邻free_obj
@@ -120,7 +121,7 @@ impl BigObjAllocator {
                 }
                 self.unused_chunks.remove(i);
                 self.unused_chunks.push(obj);
-                // println!("merge_chunks: {:p} {:p}", obj, unused_obj);
+                // eprintln!("merge_chunks: {:p} {:p}", obj, unused_obj);
                 merged = true;
             } else if unsafe { unused_obj_ptr.add(size) } == obj as *mut u8 {
                 // |  unused_obj  |    return_obj    |
@@ -129,7 +130,7 @@ impl BigObjAllocator {
                 unsafe {
                     (*unused_obj).size += size;
                 }
-                // println!("merge_chunks: {:p} {:p}", unused_obj, obj);
+                // eprintln!("merge_chunks: {:p} {:p}", unused_obj, obj);
                 merged = true;
             }
         }

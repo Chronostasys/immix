@@ -1,15 +1,18 @@
-use std::{cell::Cell, collections::VecDeque};
+use std::{cell::Cell, collections::VecDeque, sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize}, time::Instant};
 
-use parking_lot::{Mutex, ReentrantMutex};
+use crossbeam_deque::{Steal, Stealer, Worker};
+use parking_lot::{Mutex, ReentrantMutex, RwLock};
 use threadpool::ThreadPool;
 
 use crate::{
-    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, NUM_LINES_PER_BLOCK,
+    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, HeaderExt, NUM_LINES_PER_BLOCK
 };
 
 use super::big_obj_allocator::BigObjAllocator;
 
 type FinalizerList = Mutex<Vec<(*mut u8, *mut u8, fn(*mut u8))>>;
+
+pub static EP: AtomicU64 = AtomicU64::new(0);
 
 /// # Global allocator
 ///
@@ -18,16 +21,18 @@ pub struct GlobalAllocator {
     /// mmap region
     mmap: Mmap,
     /// current heap pointer
-    current: Cell<*mut u8>,
+    current: AtomicUsize,
     /// heap start
     heap_start: *mut u8,
     /// heap end
     heap_end: *mut u8,
     /// 所有被归还的空Block都会被放到这个Vec里面
-    free_blocks: Vec<(*mut Block, bool)>,
+    free_blocks:  Mutex< Worker<(*mut Block, bool)>>,
     /// 线程被销毁时的unavailable_blocks会被暂存到这里，直到下次GC的时候被别的线程
     /// 的GC获取
     unavailable_blocks: Vec<*mut Block>,
+    /// big object
+    big_objs:RwLock< Vec<*mut BigObj>>,
     /// 线程被销毁时的urecycle_blocks会被暂存到这里，直到下次GC的时候被别的线程
     /// 的GC获取
     recycle_blocks: Vec<*mut Block>,
@@ -51,6 +56,8 @@ pub struct GlobalAllocator {
     block_bytemap: *mut u8,
 
     pub(crate) finalizers: FinalizerList,
+
+    
 }
 
 unsafe impl Sync for GlobalAllocator {}
@@ -66,6 +73,9 @@ impl Drop for GlobalAllocator {
 }
 
 impl GlobalAllocator {
+    pub fn block_stealer(&self) -> Stealer<(*mut Block, bool)> {
+        self.free_blocks.lock().stealer()
+    }
     /// Create a new global allocator.
     ///
     /// size is the max heap size
@@ -83,11 +93,12 @@ impl GlobalAllocator {
         let bytemap_size = immix_size / BLOCK_SIZE;
         let block_bytemap: *mut u8 = unsafe { libc::malloc(bytemap_size) } as *mut u8;
         Self {
-            current: Cell::new(mmap.aligned(BLOCK_SIZE)),
+            current: AtomicUsize::new(mmap.aligned(BLOCK_SIZE) as _),
             heap_start: start,
             heap_end: end,
             mmap,
-            free_blocks: Vec::new(),
+            free_blocks: Mutex::new( Worker::new_lifo()),
+            big_objs:  RwLock::new( Vec::new()),
             lock: ReentrantMutex::new(()),
             big_obj_allocator: BigObjAllocator::new(size / 4),
             last_get_block_time: std::time::Instant::now(),
@@ -102,7 +113,21 @@ impl GlobalAllocator {
     }
     /// 从big object mmap中分配一个大对象，大小为size
     pub fn get_big_obj(&mut self, size: usize) -> *mut BigObj {
-        self.big_obj_allocator.get_chunk(size)
+        // eprintln!("get big obj: {}", size);
+        let obj = self.big_obj_allocator.get_chunk(size);
+        self.big_objs.write().push(obj);
+        obj
+    }
+    pub fn big_obj_from_ptr(& self, ptr: *mut u8) -> Option<*mut BigObj> {
+        for obj in self.big_objs.read().iter() {
+            // FIXME: O(n); should use a tree
+            let start = unsafe { (*obj as *mut u8).add(16) };
+            let end = unsafe { (*obj as *mut u8).add((*(*obj)).size) };
+            if start <= ptr && end >= ptr {
+                return Some(*obj);
+            }
+        }
+        None
     }
 
     pub fn register_finalizer(&self, ptr: *mut u8, arg: *mut u8, finalizer: fn(*mut u8)) {
@@ -110,30 +135,44 @@ impl GlobalAllocator {
         finalizers.push((ptr, arg, finalizer));
     }
 
-    pub fn unmap_all(&mut self) {
-        let _lock = self.lock.lock();
-        self.free_blocks.iter_mut().for_each(|(block, freed)| {
-            if *freed {
-                return;
-            }
-            self.mmap.dontneed(*block as *mut u8, BLOCK_SIZE);
-            *freed = true;
-        });
-    }
+    // pub fn unmap_all(&mut self) {
+    //     let _lock = self.lock.lock();
+    //     self.free_blocks.iter_mut().for_each(|(block, freed)| {
+    //         if *freed {
+    //             return;
+    //         }
+    //         self.mmap.dontneed(*block as *mut u8, BLOCK_SIZE);
+    //         *freed = true;
+    //     });
+    // }
 
     pub fn size(&self) -> usize {
         self.heap_end as usize - self.heap_start as usize
     }
 
-    pub fn return_big_objs<I>(&mut self, objs: I)
-    where
-        I: IntoIterator<Item = *mut BigObj>,
-    {
+    pub fn sweep_big_objs(&mut self) {
+        // eprintln!("sweep big objs");
         let _lock = self.lock.lock();
-        for obj in objs {
-            self.big_obj_allocator.return_chunk(obj);
+        let mut objs = self.big_objs.write();
+        let mut big_objs = Vec::new();
+        for obj in objs.iter() {
+            // eprintln!("sweep big obj: {:p} {} {}", *obj, unsafe { (*(*obj)).size }, unsafe { (*(*obj)).header.get_marked()});
+            if unsafe { (*(*obj)).header.get_marked() } {
+                big_objs.push(*obj);
+            } else {
+                unsafe {
+                    (**obj).header  = 0;
+                }
+                self.big_obj_allocator.return_chunk(*obj);
+            }
+            unsafe {
+                (*(*obj)).header &= !0b10;
+            }
         }
+        *objs = big_objs;
+
     }
+
 
     fn set_block_bitmap(&self, block: *mut Block, value: bool) {
         let block_start = block as usize;
@@ -154,25 +193,30 @@ impl GlobalAllocator {
     /// 从mmap的heap空间之中获取一个Option<* mut Block>，如果heap空间不够了，就返回None
     ///
     /// 每次分配block会让current增加一个block的大小
-    fn alloc_block(&self) -> Option<*mut Block> {
-        let current = self.current.get();
+    fn alloc_block<const N:usize>(&self) -> Option<[*mut Block;N]> {
+        let current = self.current.fetch_add(BLOCK_SIZE*N, std::sync::atomic::Ordering::Relaxed) as *mut u8;
         let heap_end = self.heap_end;
-        self.current
-            .set(unsafe { self.current.get().add(BLOCK_SIZE) });
-        if unsafe { current.add(BLOCK_SIZE) } > heap_end {
+        if unsafe { current.add(BLOCK_SIZE*N) } > heap_end {
             return None;
         }
-        self.mmap.commit(current, BLOCK_SIZE);
 
-        let block = Block::new(current);
+        self.mmap.commit(current, BLOCK_SIZE*N);
+        let blocks = unsafe {
+            let mut blocks = [std::ptr::null_mut();N];
+            for i in 0..N {
+                blocks[i] = current.add(i * BLOCK_SIZE) as *mut Block;
+            }
+            blocks
+        };
 
-        Some(block)
+
+        Some(blocks)
     }
 
     pub fn should_gc(&self) -> bool {
         unsafe {
-            let p = self.current.get().add(BLOCK_SIZE * 10);
-            p >= self.heap_end && self.free_blocks.is_empty()
+            let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8) .add(BLOCK_SIZE * 10);
+            p >= self.heap_end
         }
     }
 
@@ -202,61 +246,127 @@ impl GlobalAllocator {
     /// # get_block
     ///
     /// 从free_blocks中获取一个可用的block，如果没有可用的block，就从mmap的heap空间之中获取一个新block
-    pub fn get_block(&mut self) -> *mut Block {
-        // let b = self.current as *mut Block;
+    pub fn get_block(&mut self,stealer:&Stealer<(*mut Block, bool)>) -> *mut Block {
+        let start = Instant::now();
+        // let _lock = self.lock.lock();
+        loop {
+            match stealer.steal() {
+                Steal::Empty => break,
+                Steal::Success((block,freed)) => {
+                    if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
+                        return  std::ptr::null_mut();
+                    } else {
+                        self.set_block_bitmap(block, true);
+                        unsafe{block.as_mut().unwrap_unchecked().reset_header();}
+                        let ep = start.elapsed().as_nanos();
+                        EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
+                        return block;
+                    }
+                },
+                Steal::Retry => continue   ,
+            }
+        }
+        // if let Some((block, freed)) = self.free_blocks.lock().pop() {
+        //                             self.set_block_bitmap(block, true);
+        //                 unsafe{block.as_mut().unwrap_unchecked().reset_header();}
+        //     return block;
+        // }
+        // drop(_lock);
+        // let _lock = self.lock.lock();
+        // loop {
+        //     match stealer.steal() {
+        //         Steal::Empty => break,
+        //         Steal::Success((block,freed)) => {
+        //             if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
+        //                 return  std::ptr::null_mut();
+        //             } else {
+        //                 self.set_block_bitmap(block, true);
+        //                 unsafe{block.as_mut().unwrap_unchecked().reset_header();}
+        //                 let ep = start.elapsed().as_nanos();
+        //                 EP.fetch_max(ep as u64, std::sync::atomic::Ordering::Relaxed);
+        //                 return block;
+        //             }
+        //         },
+        //         Steal::Retry => continue,
+        //     }
+        // }
+        // let blocks = self.alloc_block::<32>();
+        // if let Some(bs) = blocks {
+        //     for block in bs.iter().skip(1) {
+        //         self.free_blocks.push((*block, false));
+        //     }
+        //     self.set_block_bitmap(bs[0], true);
+        //     unsafe{bs[0].as_mut().unwrap_unchecked().reset_header();}
+        //     let ep = start.elapsed().as_nanos();
+        //     EP.fetch_max(ep as u64, std::sync::atomic::Ordering::Relaxed);
+        //     bs[0]
+        // } else {
+        //     std::ptr::null_mut()
+        // }
+
+
+
+          // let b = self.current as *mut Block;
         // unsafe{
         //     // core::ptr::write_bytes(b as *mut u8, 0, 3*LINE_SIZE);
         //     (*b).reset_header();
         // }
         // return b;
-        let lock = self.lock.lock();
+        // let lock = self.lock.lock();
         self.mem_usage_flag += 1;
-        let block = if let Some((block, freed)) = self.free_blocks.pop() {
-            if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
-                std::ptr::null_mut()
-            } else {
-                block
-            }
-        } else {
-            self.alloc_block().unwrap_or(std::ptr::null_mut())
-        };
+        // let block = if let Some((block, freed)) = self.free_blocks.lock().pop() {
+        //     if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
+        //         std::ptr::null_mut()
+        //     } else {
+        //         block
+        //     }
+        // } else {
+        //     self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
+        // };
+
+        let block = 
+            self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
+        ;
+
         if block.is_null() {
             return block;
         }
         self.set_block_bitmap(block, true);
-        let now = std::time::Instant::now();
-        // 距离上次alloc时间超过1秒，检查是否需要把free_blocks中的block都dont need
-        if now.duration_since(self.last_get_block_time).as_millis() > ROUND_MIN_TIME_MILLIS {
-            self.last_get_block_time = now;
-            if self.mem_usage_flag > 0 {
-                self.round += 1;
-            } else if self.mem_usage_flag <= 0 {
-                self.round -= 1;
-            }
-            self.mem_usage_flag = 0;
-            if self.round <= -ROUND_THRESHOLD {
-                // 符合条件，进行dontneed
-                self.round = 0;
-                // println!("trigger dont need");
-                self.free_blocks
-                    .iter_mut()
-                    .filter(|(_, free)| !*free)
-                    .for_each(|(block, freed)| {
-                        if !*freed {
-                            self.mmap.dontneed(*block as *mut u8, BLOCK_SIZE);
-                            *freed = true;
-                        }
-                    });
-            } else if self.round >= ROUND_THRESHOLD {
-                self.round = 0;
-            }
-        }
-        drop(lock);
+        // let now = std::time::Instant::now();
+        // // 距离上次alloc时间超过1秒，检查是否需要把free_blocks中的block都dont need
+        // if now.duration_since(self.last_get_block_time).as_millis() > ROUND_MIN_TIME_MILLIS {
+        //     self.last_get_block_time = now;
+        //     if self.mem_usage_flag > 0 {
+        //         self.round += 1;
+        //     } else if self.mem_usage_flag <= 0 {
+        //         self.round -= 1;
+        //     }
+        //     self.mem_usage_flag = 0;
+        //     if self.round <= -ROUND_THRESHOLD {
+        //         // 符合条件，进行dontneed
+        //         self.round = 0;
+        //         // println!("trigger dont need");
+        //         self.free_blocks
+        //             .iter_mut()
+        //             .filter(|(_, free)| !*free)
+        //             .for_each(|(block, freed)| {
+        //                 if !*freed {
+        //                     self.mmap.dontneed(*block as *mut u8, BLOCK_SIZE);
+        //                     *freed = true;
+        //                 }
+        //             });
+        //     } else if self.round >= ROUND_THRESHOLD {
+        //         self.round = 0;
+        //     }
+        // }
+        // drop(lock);
         unsafe {
             #[cfg(feature = "zero_init")]
             core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
             (*block).reset_header();
         }
+                    let ep = start.elapsed().as_nanos();
+            // EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
         block
     }
 
@@ -270,11 +380,9 @@ impl GlobalAllocator {
     where
         I: IntoIterator<Item = *mut Block>,
     {
-        let _lock = self.lock.lock();
         for block in blocks {
-            self.mem_usage_flag -= 1;
             self.set_block_bitmap(block, false);
-            self.free_blocks.push((block, false));
+            self.free_blocks.lock().push((block, false));
             // self.mmap
             //     .dontneed(block as *mut Block as *mut u8, BLOCK_SIZE);
         }
@@ -290,7 +398,7 @@ impl GlobalAllocator {
         for block in eva {
             self.mem_usage_flag -= 1;
             self.set_block_bitmap(*block, false);
-            self.free_blocks.push((*block, false));
+            self.free_blocks.lock().push((*block, false));
         }
     }
 
@@ -305,7 +413,7 @@ impl GlobalAllocator {
     /// # in heap
     /// 判断一个指针是否在heap之中
     pub fn in_heap(&self, ptr: *mut u8) -> bool {
-        ptr >= self.heap_start && ptr < self.current.get() && self.get_ptr_bitmap(ptr)
+        ptr >= self.heap_start && ptr < (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8) && self.get_ptr_bitmap(ptr)
     }
 
     /// # in_big_heap

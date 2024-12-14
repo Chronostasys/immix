@@ -177,8 +177,8 @@ pub unsafe extern "C" fn DioGC__set_eva(eva: i32) {
     DioGC::set_eva(eva)
 }
 #[no_mangle]
-pub unsafe extern "C" fn DioGC__safepoint(sp: *mut u8) {
-    DioGC::safepoint(sp)
+pub unsafe extern "C" fn DioGC__safepoint_ex(sp: *mut u8,    space: *mut *mut Collector) {
+    crate::safepoint_fast_unwind_ex(sp, space);
 }
 #[no_mangle]
 pub unsafe extern "C" fn DioGC__about() {
@@ -194,3 +194,12 @@ pub unsafe extern "C" fn gc_exit_block() {
 pub unsafe extern "C" fn gc_print_block_time() {
     crate::print_block_time()
 }
+
+
+#[no_mangle]
+pub unsafe extern "C" fn gc_set_high_sp(sp:*mut u8) {
+    crate::set_high_sp(sp);
+}
+
+
+

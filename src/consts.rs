@@ -57,3 +57,5 @@ pub const REMAIN_MULTIPLIER: usize = 50;
 pub const LLVM_GC_STRATEGY_NAME: &str = "plimmix";
 
 pub const BIG_OBJ_ALIGN: usize = 128;
+
+pub const PUSH_BACK_THRESHOLD: usize = 50;

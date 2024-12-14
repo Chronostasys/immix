@@ -27,6 +27,9 @@ pub struct Function {
     // pub safe_points: Rc<Vec<*const u8>>,
 }
 
+unsafe impl Send for Function {}
+unsafe impl Sync for Function {}
+
 impl Function {
     pub fn iter_roots(&self) -> impl Iterator<Item = i32> + '_ {
         self.roots.iter().copied()
