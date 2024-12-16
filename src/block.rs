@@ -337,7 +337,7 @@ impl Block {
         debug_assert!(self.cursor+ self.next_hole_size >= NUM_LINES_PER_BLOCK || self.line_map[self.cursor+ self.next_hole_size] & 1 == 1);
         self.hole_num = holes;
         debug_assert!(self.hole_num == count_holes(&self.line_map));
-
+        debug_assert!(self.available_line_num <= NUM_LINES_PER_BLOCK - 3);
 
 
 
@@ -471,7 +471,7 @@ impl Block {
 
     pub unsafe fn get_nth_line_header(&mut self, idx: usize) -> &mut LineHeader {
         debug_assert!(idx < NUM_LINES_PER_BLOCK);
-        self.line_map.get_mut(idx).unwrap()
+        self.line_map.get_unchecked_mut(idx)
     }
 
     /// # get_line_idx_from_addr
@@ -520,22 +520,18 @@ impl Block {
         debug_assert!(self.available_line_num <= NUM_LINES_PER_BLOCK - 3);
         let cursor = self.cursor;
         let line_size = (size - 1) / LINE_SIZE + 1;
-        // if self.next_hole_size == 0 {
-        //     debug_assert!(self.cursor>=NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1);
-        //     self.hole_num -= 1;
-        //     debug_assert!(self.hole_num == count_holes(&self.line_map));
-        // }
+
         if self.next_hole_size >= line_size {
             // fast path
             self.available_line_num -= line_size;
-            for i in (self.cursor + 1)..=self.cursor - 1 + line_size {
-                let header = self.line_map.get_unchecked_mut(i);
-                header.set_used(true);
-            }
             let start = self.cursor;
             // 设置起始line header的obj_type
             let header = self.line_map.get_unchecked_mut(start);
             *header |= (obj_type as u8) << 2 | 0b10000001;
+            for i in (self.cursor + 1)..=self.cursor - 1 + line_size {
+                let header = self.line_map.get_unchecked_mut(i);
+                header.set_used(true);
+            }
             self.cursor += line_size;
             self.next_hole_size -= line_size;
             if self.next_hole_size == 0 {
@@ -552,14 +548,14 @@ impl Block {
         // debug_assert!(hole.is_some(), "cursor {}, header {:?}, hole: {} av {} first idx {} first_len {}", cursor,self.line_map,self.hole_num,self.available_line_num, self.first_hole_line_idx,self.first_hole_line_len);
         if let Some((start, len)) = hole {
             self.available_line_num -= line_size;
+            // 设置起始line header的obj_type
+            let header = self.line_map.get_unchecked_mut(start);
+            *header |= (obj_type as u8) << 2 | 0b10000001;
             // 标记为已使用
-            for i in start..=start - 1 + line_size {
+            for i in (start+1)..=start - 1 + line_size {
                 let header = self.line_map.get_unchecked_mut(i);
                 header.set_used(true);
             }
-            // 设置起始line header的obj_type
-            let header = self.line_map.get_unchecked_mut(start);
-            *header |= (obj_type as u8) << 2 | 0b10000000;
 
             // 更新first_hole_line_idx和first_hole_line_len
             self.cursor = start + line_size;
@@ -587,7 +583,7 @@ mod tests {
     fn test_block_hole() {
         unsafe {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
-            let block = &mut *ga.get_block(&ga.block_stealer());
+            let block = &mut *ga.get_block();
             // // 第一个hole应该是从第三行开始，长度是253
             // assert_eq!(block.find_first_hole(), Some((3, 253)));
             // 标记hole隔一行之后的第一行为已使用
@@ -608,7 +604,7 @@ mod tests {
     fn test_correct_header() {
         unsafe {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
-            let block = &mut *ga.get_block(&ga.block_stealer());
+            let block = &mut *ga.get_block();
             block.alloc(6, super::ObjectType::Atomic);
 
             block.alloc(6, super::ObjectType::Atomic);

@@ -1,4 +1,4 @@
-use std::process::exit;
+use std::{os::raw::c_void, process::exit};
 
 use crate::{gc_malloc_fast_unwind, gc_malloc_fast_unwind_ex, gc_malloc_no_collect, Collector};
 use backtrace::Backtrace;
@@ -18,8 +18,8 @@ impl DioGC {
     }
     pub unsafe fn malloc(size: u64, obj_type: u8, rsp: *mut *mut u8) -> *mut u8 {
         trace!("malloc: {} {}", size, obj_type);
-        #[cfg(any(test, debug_assertions))]
-        crate::gc_collect_fast_unwind(rsp as _);
+        // #[cfg(any(test, debug_assertions))]
+        // crate::gc_collect_fast_unwind(rsp as _);
         let re = gc_malloc_fast_unwind(size as usize, obj_type, rsp as _);
         if re.is_null() && size != 0 {
             eprintln!("gc malloc failed! (OOM)");
@@ -200,6 +200,4 @@ pub unsafe extern "C" fn gc_print_block_time() {
 pub unsafe extern "C" fn gc_set_high_sp(sp:*mut u8) {
     crate::set_high_sp(sp);
 }
-
-
 

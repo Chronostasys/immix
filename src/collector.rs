@@ -240,15 +240,10 @@ impl Collector {
     /// Allocate a new object, if it trigger a GC, it will use stack pointer to walk gc frames.
     ///
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
-    #[inline(always)]
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
-        if size == 0 {
-            panic!("alloc size can not be zero");
-        }
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
-        SLOW_PATH_COUNT.fetch_add(1, Ordering::Relaxed);
         // let start = Instant::now();
         let ptr = self.alloc_no_collect(size, obj_type);
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -307,6 +302,7 @@ impl Collector {
     /// # alloc_no_collect
     ///
     /// Allocate a new object without possibility triggering a GC.
+    #[inline(always)]
     pub fn alloc_no_collect(&self, size: usize, obj_type: ObjectType) -> *mut u8 {
         if size == 0 {
             return std::ptr::null_mut();
@@ -858,6 +854,7 @@ impl Collector {
         self.mark_queue(&stealers);
 
         let mut v = GC_COLLECTOR_COUNT.lock();
+        unsafe {self.thread_local_allocator.as_mut().unwrap_unchecked().return_prev_free_blocks();}
         v.1 -= 1;
         if v.1 != 0 {
             GC_MARK_COND.wait_while(&mut v, |(_,w,_)| {
@@ -915,14 +912,8 @@ impl Collector {
                 }
                 let mut empty_num = 0;
                 for stealer in stealers {
-                    match stealer.steal() {
-                        Steal::Success(job) => match job {
-                            SendableMarkJob::Frame(f) => {
-                                self.mark_frame(&f.0, &f.1);
-                            }
-                            SendableMarkJob::Object((obj, obj_type)) => {
-                                self.mark_obj(obj_type, obj)
-                            }
+                    match stealer.steal_batch(&self.queue) {
+                        Steal::Success(_) => {
                         },
                         Steal::Empty => {
                             empty_num += 1;
@@ -1113,6 +1104,8 @@ impl Collector {
         self.collect_fast_unwind(std::ptr::null_mut());
     }
 
+
+    
     /// # collect_fast_unwind
     ///
     /// Collect garbage, use stack pointer to walk gc frames.
@@ -1125,6 +1118,13 @@ impl Collector {
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn collect_fast_unwind(&self, sp: *mut u8) {
+    //         // Create a signpost interval for your function. The interval ends
+    // // when the variable goes out of scope.
+    // let _interval = signpost::begin_interval!(
+    //     LOGGER,
+    //     /* Interval ID */ self.id as _,
+    //     /* Interval name */ "collect_fast_unwind_ex",
+    // );
         #[cfg(feature = "gc_profile")]
         eprintln!(
             "gc {} start collect at {:?}",

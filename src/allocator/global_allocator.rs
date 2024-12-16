@@ -1,14 +1,20 @@
-use std::{cell::Cell, collections::VecDeque, sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize}, time::Instant};
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize},
+    time::Instant,
+};
 
-use crossbeam_deque::{Steal, Stealer, Worker};
 use parking_lot::{Mutex, ReentrantMutex, RwLock};
+
 use threadpool::ThreadPool;
 
 use crate::{
-    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, HeaderExt, NUM_LINES_PER_BLOCK
+    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, HeaderExt,
+    NUM_LINES_PER_BLOCK,
 };
 
-use super::big_obj_allocator::BigObjAllocator;
+use super::{big_obj_allocator::BigObjAllocator, global_freelist::Freelist};
 
 type FinalizerList = Mutex<Vec<(*mut u8, *mut u8, fn(*mut u8))>>;
 
@@ -27,17 +33,17 @@ pub struct GlobalAllocator {
     /// heap end
     heap_end: *mut u8,
     /// 所有被归还的空Block都会被放到这个Vec里面
-    free_blocks:  Mutex< Worker<(*mut Block, bool)>>,
+    free_blocks: Freelist<*mut Block>,
     /// 线程被销毁时的unavailable_blocks会被暂存到这里，直到下次GC的时候被别的线程
     /// 的GC获取
     unavailable_blocks: Vec<*mut Block>,
     /// big object
-    big_objs:RwLock< Vec<*mut BigObj>>,
+    big_objs: RwLock<Vec<*mut BigObj>>,
     /// 线程被销毁时的urecycle_blocks会被暂存到这里，直到下次GC的时候被别的线程
     /// 的GC获取
     recycle_blocks: Vec<*mut Block>,
     /// lock
-    lock: ReentrantMutex<()>,
+    lock: Mutex<()>,
     /// big object mmap
     pub big_obj_allocator: BigObjAllocator,
 
@@ -57,7 +63,7 @@ pub struct GlobalAllocator {
 
     pub(crate) finalizers: FinalizerList,
 
-    
+    free_list_mtx: RwLock<()>,
 }
 
 unsafe impl Sync for GlobalAllocator {}
@@ -73,9 +79,9 @@ impl Drop for GlobalAllocator {
 }
 
 impl GlobalAllocator {
-    pub fn block_stealer(&self) -> Stealer<(*mut Block, bool)> {
-        self.free_blocks.lock().stealer()
-    }
+    // pub fn block_stealer(&self) -> Stealer<*mut Block> {
+    //     self.free_blocks.lock().stealer()
+    // }
     /// Create a new global allocator.
     ///
     /// size is the max heap size
@@ -97,9 +103,9 @@ impl GlobalAllocator {
             heap_start: start,
             heap_end: end,
             mmap,
-            free_blocks: Mutex::new( Worker::new_lifo()),
-            big_objs:  RwLock::new( Vec::new()),
-            lock: ReentrantMutex::new(()),
+            free_blocks: Freelist::new(bytemap_size),
+            big_objs: RwLock::new(Vec::new()),
+            lock: Mutex::new(()),
             big_obj_allocator: BigObjAllocator::new(size / 4),
             last_get_block_time: std::time::Instant::now(),
             mem_usage_flag: 0,
@@ -109,6 +115,7 @@ impl GlobalAllocator {
             recycle_blocks: vec![],
             block_bytemap,
             finalizers: Mutex::new(Vec::new()),
+            free_list_mtx: RwLock::new(()),
         }
     }
     /// 从big object mmap中分配一个大对象，大小为size
@@ -118,7 +125,7 @@ impl GlobalAllocator {
         self.big_objs.write().push(obj);
         obj
     }
-    pub fn big_obj_from_ptr(& self, ptr: *mut u8) -> Option<*mut BigObj> {
+    pub fn big_obj_from_ptr(&self, ptr: *mut u8) -> Option<*mut BigObj> {
         for obj in self.big_objs.read().iter() {
             // FIXME: O(n); should use a tree
             let start = unsafe { (*obj as *mut u8).add(16) };
@@ -161,7 +168,7 @@ impl GlobalAllocator {
                 big_objs.push(*obj);
             } else {
                 unsafe {
-                    (**obj).header  = 0;
+                    (**obj).header = 0;
                 }
                 self.big_obj_allocator.return_chunk(*obj);
             }
@@ -170,9 +177,7 @@ impl GlobalAllocator {
             }
         }
         *objs = big_objs;
-
     }
-
 
     fn set_block_bitmap(&self, block: *mut Block, value: bool) {
         let block_start = block as usize;
@@ -193,29 +198,32 @@ impl GlobalAllocator {
     /// 从mmap的heap空间之中获取一个Option<* mut Block>，如果heap空间不够了，就返回None
     ///
     /// 每次分配block会让current增加一个block的大小
-    fn alloc_block<const N:usize>(&self) -> Option<[*mut Block;N]> {
-        let current = self.current.fetch_add(BLOCK_SIZE*N, std::sync::atomic::Ordering::Relaxed) as *mut u8;
+    fn alloc_block<const N: usize>(&self) -> Option<[*mut Block; N]> {
+        let current = self
+            .current
+            .fetch_add(BLOCK_SIZE * N, std::sync::atomic::Ordering::Relaxed)
+            as *mut u8;
         let heap_end = self.heap_end;
-        if unsafe { current.add(BLOCK_SIZE*N) } > heap_end {
+        if unsafe { current.add(BLOCK_SIZE * N) } > heap_end {
             return None;
         }
 
-        self.mmap.commit(current, BLOCK_SIZE*N);
+        self.mmap.commit(current, BLOCK_SIZE * N);
         let blocks = unsafe {
-            let mut blocks = [std::ptr::null_mut();N];
+            let mut blocks = [std::ptr::null_mut(); N];
             for i in 0..N {
                 blocks[i] = current.add(i * BLOCK_SIZE) as *mut Block;
             }
             blocks
         };
 
-
         Some(blocks)
     }
 
     pub fn should_gc(&self) -> bool {
         unsafe {
-            let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8) .add(BLOCK_SIZE * 10);
+            let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8)
+                .add(BLOCK_SIZE * 10);
             p >= self.heap_end
         }
     }
@@ -246,26 +254,7 @@ impl GlobalAllocator {
     /// # get_block
     ///
     /// 从free_blocks中获取一个可用的block，如果没有可用的block，就从mmap的heap空间之中获取一个新block
-    pub fn get_block(&mut self,stealer:&Stealer<(*mut Block, bool)>) -> *mut Block {
-        let start = Instant::now();
-        // let _lock = self.lock.lock();
-        loop {
-            match stealer.steal() {
-                Steal::Empty => break,
-                Steal::Success((block,freed)) => {
-                    if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
-                        return  std::ptr::null_mut();
-                    } else {
-                        self.set_block_bitmap(block, true);
-                        unsafe{block.as_mut().unwrap_unchecked().reset_header();}
-                        let ep = start.elapsed().as_nanos();
-                        EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
-                        return block;
-                    }
-                },
-                Steal::Retry => continue   ,
-            }
-        }
+    pub fn get_block(&mut self) -> *mut Block {
         // if let Some((block, freed)) = self.free_blocks.lock().pop() {
         //                             self.set_block_bitmap(block, true);
         //                 unsafe{block.as_mut().unwrap_unchecked().reset_header();}
@@ -304,29 +293,18 @@ impl GlobalAllocator {
         //     std::ptr::null_mut()
         // }
 
-
-
-          // let b = self.current as *mut Block;
+        // let b = self.current as *mut Block;
         // unsafe{
         //     // core::ptr::write_bytes(b as *mut u8, 0, 3*LINE_SIZE);
         //     (*b).reset_header();
         // }
         // return b;
-        // let lock = self.lock.lock();
-        self.mem_usage_flag += 1;
-        // let block = if let Some((block, freed)) = self.free_blocks.lock().pop() {
-        //     if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
-        //         std::ptr::null_mut()
-        //     } else {
-        //         block
-        //     }
-        // } else {
-        //     self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
-        // };
-
-        let block = 
+        // self.mem_usage_flag += 1;
+        let block = if let Some(block) = self.free_blocks.pop() {
+            block
+        } else {
             self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
-        ;
+        };
 
         if block.is_null() {
             return block;
@@ -365,8 +343,8 @@ impl GlobalAllocator {
             core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
             (*block).reset_header();
         }
-                    let ep = start.elapsed().as_nanos();
-            // EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
+        // let ep = start.elapsed().as_nanos();
+        // EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
         block
     }
 
@@ -380,12 +358,34 @@ impl GlobalAllocator {
     where
         I: IntoIterator<Item = *mut Block>,
     {
+        let _lock = self.free_list_mtx.write();
         for block in blocks {
             self.set_block_bitmap(block, false);
-            self.free_blocks.lock().push((block, false));
+            self.free_blocks.push(block);
             // self.mmap
             //     .dontneed(block as *mut Block as *mut u8, BLOCK_SIZE);
         }
+    }
+
+    pub fn get_block_locked(&mut self) -> *mut Block {
+        let _lock = self.free_list_mtx.read();
+
+        let block = if let Some(block) = self.free_blocks.pop() {
+            block
+        } else {
+            self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
+        };
+
+        if block.is_null() {
+            return block;
+        }
+        self.set_block_bitmap(block, true);
+        unsafe {
+            #[cfg(feature = "zero_init")]
+            core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
+            (*block).reset_header();
+        }
+        block
     }
 
     pub fn on_thread_destroy<I>(&mut self, eva: &[*mut Block], recycle: I, unv: &[*mut Block])
@@ -398,7 +398,7 @@ impl GlobalAllocator {
         for block in eva {
             self.mem_usage_flag -= 1;
             self.set_block_bitmap(*block, false);
-            self.free_blocks.lock().push((*block, false));
+            _ = self.free_blocks.push(*block);
         }
     }
 
@@ -413,7 +413,9 @@ impl GlobalAllocator {
     /// # in heap
     /// 判断一个指针是否在heap之中
     pub fn in_heap(&self, ptr: *mut u8) -> bool {
-        ptr >= self.heap_start && ptr < (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8) && self.get_ptr_bitmap(ptr)
+        ptr >= self.heap_start
+            && ptr < (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8)
+            && self.get_ptr_bitmap(ptr)
     }
 
     /// # in_big_heap

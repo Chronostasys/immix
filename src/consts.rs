@@ -52,7 +52,7 @@ pub const SHRINK_PROPORTION: f64 = 0.98;
 ///
 /// if [FREE_SPACE_DIVISOR] is 4, setting 24 here means
 /// bytes remain after gc should be less than 1/8 of the bytes allocated
-pub const REMAIN_MULTIPLIER: usize = 50;
+pub const REMAIN_MULTIPLIER: usize = 24;
 
 pub const LLVM_GC_STRATEGY_NAME: &str = "plimmix";
 
