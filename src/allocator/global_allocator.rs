@@ -199,6 +199,7 @@ impl GlobalAllocator {
     ///
     /// 每次分配block会让current增加一个block的大小
     fn alloc_block<const N: usize>(&self) -> Option<[*mut Block; N]> {
+        // crate::SLOW_PATH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let current = self
             .current
             .fetch_add(BLOCK_SIZE * N, std::sync::atomic::Ordering::Relaxed)
@@ -223,8 +224,8 @@ impl GlobalAllocator {
     pub fn should_gc(&self) -> bool {
         unsafe {
             let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8)
-                .add(BLOCK_SIZE * 10);
-            p >= self.heap_end
+                .add(BLOCK_SIZE * 32);
+            p >= self.heap_end && self.free_blocks.is_empty()
         }
     }
 

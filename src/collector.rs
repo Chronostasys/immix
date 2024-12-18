@@ -23,6 +23,7 @@ use crate::{
 
 pub static SLOW_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
 
+
 fn get_ip_from_sp(sp: *mut u8) -> *mut u8 {
     let sp = sp as *mut *mut u8;
     // check align
@@ -241,6 +242,7 @@ impl Collector {
     ///
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
+        let start = Instant::now();
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
@@ -256,6 +258,7 @@ impl Collector {
                     .alloc(size, obj_type)
             };
         }
+        // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         ptr
     }
 
@@ -274,7 +277,7 @@ impl Collector {
                     .as_mut()
                     .unwrap_unchecked()
                     .should_gc()
-            })
+            }&& !GC_SWEEPING.load(Ordering::Acquire))
         {
             status.am_i_triggered = true;
             drop(status);
@@ -779,6 +782,7 @@ impl Collector {
             drop(v);
             stealers
         };
+        // println!("gc mark {}: start", self.id);
         #[cfg(feature = "gc_profile")]
         eprintln!(
             "gc {} done mark sync at {:?}",
@@ -852,9 +856,8 @@ impl Collector {
         }
 
         self.mark_queue(&stealers);
-
-        let mut v = GC_COLLECTOR_COUNT.lock();
         unsafe {self.thread_local_allocator.as_mut().unwrap_unchecked().return_prev_free_blocks();}
+        let mut v = GC_COLLECTOR_COUNT.lock();
         v.1 -= 1;
         if v.1 != 0 {
             GC_MARK_COND.wait_while(&mut v, |(_,w,_)| {
@@ -896,6 +899,7 @@ impl Collector {
             drop(v);
             unsafe{GLOBAL_ALLOCATOR.0.as_mut().unwrap_unchecked().sweep_big_objs()};
         }
+        // println!("gc mark {}: end", self.id);
     }
 
     fn mark_queue(&self, stealers: &[Stealer<SendableMarkJob>]) {
@@ -1065,6 +1069,7 @@ impl Collector {
 
         let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         if v - 1 == 0 {
+            // println!("gc sweep end {}", self.id);
             GC_SWEEPING.store(false, Ordering::Release);
         }
         #[cfg(feature = "gc_profile")]
@@ -1167,7 +1172,7 @@ impl Collector {
                     .fill_available_histogram(&mut available_histogram);
                 let mut required_lines = 0;
                 let mark_histogram = &mut *self.mark_histogram;
-                for threshold in (0..(NUM_LINES_PER_BLOCK / 2)).rev() {
+                for threshold in (0..=(NUM_LINES_PER_BLOCK / 2)).rev() {
                     // 从洞多到洞少遍历，计算剩余空间，直到空间不足
                     // 此时洞的数量就是驱逐阀域
                     required_lines += *mark_histogram.get(&threshold).unwrap_or(&0);

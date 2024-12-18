@@ -47,6 +47,9 @@ impl <T:Copy> Freelist<T> {
             Some(item)
         }
     }
+    pub fn is_empty(&self) -> bool {
+        self.inner.cursor.load(Ordering::Relaxed) < 0
+    }
 
     pub fn pop_n<const N:usize>(&self, dest: &mut VecDeque<T>) -> Result<(),()> {
         let inner = & self.inner;
@@ -88,6 +91,36 @@ impl <T> Inner<T> {
             buf: buf.into_boxed_slice(),
             cursor: AtomicIsize::new(-1),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_freelist() {
+        let mut freelist = Freelist::<usize>::new(10);
+        for i in 0..10 {
+            freelist.push(i);
+        }
+        for i in 0..10 {
+            assert_eq!(freelist.pop(), Some(9-i));
+        }
+        assert_eq!(freelist.pop(), None);
+    }
+    #[test]
+    fn test_freelist_pop_n() {
+        let mut freelist = Freelist::<usize>::new(10);
+        for i in 0..10 {
+            freelist.push(i);
+        }
+        let mut dest = VecDeque::new();
+        assert_eq!(freelist.pop_n::<10>(&mut dest), Ok(()));
+        for i in 0..10 {
+            assert_eq!(dest.pop_front(), Some(9-i));
+        }
+        assert_eq!(freelist.pop(), None);
     }
 }
 

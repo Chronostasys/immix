@@ -240,7 +240,7 @@ impl ThreadLocalAllocator {
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
         unsafe {
-            while (**f).is_eva_candidate() || (**f).is_exaushted() {
+            while ((**f).is_eva_candidate() && self.collect_mode) || (**f).is_exaushted() {
                 let uf = self.recyclable_blocks.pop_front().unwrap_unchecked();
                 self.unavailable_blocks.push(uf);
                 let ff = self.recyclable_blocks.front();
@@ -317,8 +317,8 @@ impl ThreadLocalAllocator {
             // unsafe {
             //     debug_assert!((*new_block).find_first_hole().is_some());
             // }
-            self.curr_block = new_block;
-            self.recyclable_blocks.push_front(new_block);
+            self.recyclable_blocks.push_back(new_block);
+            unsafe{self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();}
         }
         re
     }
@@ -424,6 +424,9 @@ impl ThreadLocalAllocator {
                 }
             }
         }
+
+        // order recycle blocks by address
+        recyclable_blocks.make_contiguous().sort_unstable_by(|a, b| a.cmp(b));
         self.recyclable_blocks = recyclable_blocks;
         self.unavailable_blocks = unavailable_blocks;
         let total_block_num =
@@ -451,6 +454,7 @@ impl ThreadLocalAllocator {
             }
         }
         debug_assert!(free_blocks.iter().filter(|b| unsafe{b.as_mut().unwrap().get_available_line_num_and_holes().0 > NUM_LINES_PER_BLOCK}) .count() == 0);
+        free_blocks.sort_unstable_by(|a, b| a.cmp(b));
         self.blocks_to_return = free_blocks;
 
 

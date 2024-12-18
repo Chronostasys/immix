@@ -175,7 +175,22 @@ pub fn gc_malloc_fast_unwind_ex(
     // gc_malloc_fast_unwind(size, obj_type, sp)
     if unsafe { *space }.is_null() {
         let re = SPACE.with(|gc1| {
-            slow_thread_local(&mut space, size, obj_type, sp, gc1)
+            {
+                let space: &mut *mut *mut Collector = &mut space;
+                let gc = gc1.get();
+                unsafe { **space = gc }
+                // let regs = Collector::get_registers();
+                // unsafe{gc.as_mut().unwrap().set_registers(regs)};
+                // let sp = Collector::current_sp();
+                // eprintln!("space setted {:p}", gc);
+                let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
+                    size,
+                    ObjectType::from_int(obj_type).unwrap(),
+                    sp,
+                );
+                // unsafe{gc.as_mut().unwrap().update_resgisters();};
+                re
+            }
         });
         re
     } else {
@@ -199,22 +214,7 @@ pub fn gc_malloc_fast_unwind_ex(
 
 
 
-#[inline(never)]
-fn slow_thread_local(space: &mut *mut *mut Collector, size: usize, obj_type: u8, sp: *mut u8, gc1: &UnsafeCell<Collector>) -> *mut u8 {
-    let gc = gc1.get();
-    unsafe { **space = gc }
-    // let regs = Collector::get_registers();
-    // unsafe{gc.as_mut().unwrap().set_registers(regs)};
-    // let sp = Collector::current_sp();
-    // eprintln!("space setted {:p}", gc);
-    let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
-        size,
-        ObjectType::from_int(obj_type).unwrap(),
-        sp,
-    );
-    // unsafe{gc.as_mut().unwrap().update_resgisters();};
-    re
-}
+
 
 /// # gc_malloc_no_collect
 ///
@@ -350,8 +350,7 @@ pub fn safepoint_fast_unwind(sp: *mut u8) {
     })
 }
 
-pub fn safepoint_fast_unwind_ex(sp: *mut u8, space: *mut *mut Collector) {
-    let gc = unsafe { *space };
+pub fn safepoint_fast_unwind_ex(sp: *mut u8, gc: *mut Collector) {
     unsafe { gc.as_ref().unwrap() }.safepoint_fast_unwind(sp);
 }
 
