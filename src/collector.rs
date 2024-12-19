@@ -1,10 +1,13 @@
 #![allow(clippy::box_collection)]
 use std::{
-    arch::asm, cell::{RefCell, UnsafeCell}, cmp::min, sync::{
+    cell::{RefCell, UnsafeCell},
+    cmp::min,
+    sync::{
         atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
-        mpsc::{channel, Receiver, Sender, SyncSender},
+        mpsc::{channel, Receiver, Sender},
         Arc,
-    }, time::{Duration, Instant}
+    },
+    time::{Duration, Instant},
 };
 
 use crossbeam_deque::{Steal, Stealer, Worker};
@@ -17,12 +20,15 @@ use crate::GC_INIT_TIME;
 #[cfg(feature = "llvm_stackmap")]
 use crate::STACK_MAP;
 use crate::{
-    allocator::{GlobalAllocator, ThreadLocalAllocator}, block::{Block, LineHeaderExt, ObjectType}, gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, SendableMarkJob, ENABLE_EVA, FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING, GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK, PUSH_BACK_THRESHOLD, REMAIN_MULTIPLIER, SHOULD_EXIT, SHRINK_PROPORTION, THRESHOLD_PROPORTION, USED_SPACE_DIVISOR, USE_SHADOW_STACK
+    allocator::{GlobalAllocator, ThreadLocalAllocator},
+    block::{Block, LineHeaderExt, ObjectType},
+    gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, SendableMarkJob, ENABLE_EVA,
+    FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING,
+    GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK,
+    REMAIN_MULTIPLIER, SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
 };
 
-
 pub static SLOW_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
-
 
 fn get_ip_from_sp(sp: *mut u8) -> *mut u8 {
     let sp = sp as *mut *mut u8;
@@ -83,7 +89,7 @@ fn walk_gc_frames(sp: *mut u8, mut walker: impl FnMut(*mut u8, *mut u8, &'static
 pub struct Collector {
     thread_local_allocator: *mut ThreadLocalAllocator,
     bytes_allocated_since_last_gc: UnsafeCell<usize>,
-    registers: UnsafeCell< [usize; 32]>,
+    registers: UnsafeCell<[usize; 32]>,
     former_registers: [usize; 32],
     stuck_sp: *mut u8,
     water_mark_sp: *mut u8,
@@ -119,7 +125,7 @@ pub type VtableFunc = extern "C" fn(*mut u8, &Collector, VisitFunc, VisitFunc, V
 
 impl Drop for Collector {
     fn drop(&mut self) {
-        // println!("Collector {} is dropped", self.id);
+        log::info!("Collector {} is dropped", self.id);
         unsafe {
             if self.live {
                 let mut v = GC_COLLECTOR_COUNT.lock();
@@ -145,13 +151,11 @@ impl Collector {
         let id = GC_ID.fetch_add(1, Ordering::Relaxed);
         let mut v = GC_COLLECTOR_COUNT.lock();
         if GC_RUNNING.load(Ordering::Acquire) {
-            GC_MARK_COND.wait_while(&mut v, |_| {
-                GC_RUNNING.load(Ordering::Acquire)
-            });
+            GC_MARK_COND.wait_while(&mut v, |_| GC_RUNNING.load(Ordering::Acquire));
         }
         v.0 += 1;
         let worker = Worker::new_lifo();
-        v.2.insert(id,worker.stealer());
+        v.2.insert(id, worker.stealer());
         GC_MARK_COND.notify_all();
         drop(v);
         unsafe {
@@ -200,9 +204,9 @@ impl Collector {
         drop(unsafe { Box::from_raw(self.thread_local_allocator) });
         self.live = false;
         GC_MARK_COND.notify_all();
+        log::info!("Collector {} is unregistered", self.id);
         drop(v);
     }
-
 
     pub fn set_high_sp(&mut self, sp: *mut u8) {
         self.water_mark_sp = sp;
@@ -242,7 +246,6 @@ impl Collector {
     ///
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
-        let start = Instant::now();
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
@@ -250,7 +253,11 @@ impl Collector {
         let ptr = self.alloc_no_collect(size, obj_type);
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if ptr.is_null() {
+            spin_until!(!GC_SWEEPING.load(Ordering::Acquire));
+            log::info!("gc {}: OOM, start emergency gc", self.id);
+            ENABLE_EVA.store(false, Ordering::Release);
             self.collect_fast_unwind(sp);
+            ENABLE_EVA.store(true, Ordering::Release);
             return unsafe {
                 self.thread_local_allocator
                     .as_mut()
@@ -265,20 +272,23 @@ impl Collector {
     #[inline(always)]
     fn collect_if_needed_fast_unwind(&self, sp: *mut u8) {
         if GC_RUNNING.load(Ordering::Acquire) {
+            log::info!("gc {}: GC is running, start gc", self.id);
             self.collect_fast_unwind(sp);
             return;
         }
         let mut status = self.status.borrow_mut();
         if (unsafe { *self.bytes_allocated_since_last_gc.get() }
             + status.last_gc_remaining * REMAIN_MULTIPLIER
-            >= status.collect_threshold && !GC_SWEEPING.load(Ordering::Acquire))
+            >= status.collect_threshold
+            && !GC_SWEEPING.load(Ordering::Acquire))
             || (unsafe {
                 self.thread_local_allocator
                     .as_mut()
                     .unwrap_unchecked()
                     .should_gc()
-            }&& !GC_SWEEPING.load(Ordering::Acquire))
+            } && !GC_SWEEPING.load(Ordering::Acquire))
         {
+            log::info!("gc {}: GC is needed, start gc", self.id);
             status.am_i_triggered = true;
             drop(status);
             self.collect_fast_unwind(sp);
@@ -310,6 +320,7 @@ impl Collector {
         if size == 0 {
             return std::ptr::null_mut();
         }
+        log::info!("gc {}: alloc {} bytes", self.id, size);
         unsafe {
             // let mut status = self.status.borrow_mut();
             *self.bytes_allocated_since_last_gc.get() += ((size - 1) / LINE_SIZE + 1) * LINE_SIZE;
@@ -623,7 +634,14 @@ impl Collector {
         }
         let vptr = *(ptr as *mut *mut u8);
         // stack may contain old pointer that's collected before
-        if vptr.is_null() || self.thread_local_allocator.as_mut().unwrap().in_heap(vptr) || self.thread_local_allocator.as_mut().unwrap().in_big_heap(vptr) {
+        if vptr.is_null()
+            || self.thread_local_allocator.as_mut().unwrap().in_heap(vptr)
+            || self
+                .thread_local_allocator
+                .as_mut()
+                .unwrap()
+                .in_big_heap(vptr)
+        {
             return;
         }
         let vtable = *(ptr as *mut VtableFunc);
@@ -744,10 +762,15 @@ impl Collector {
         v.1 += 1;
         let count = v.0;
         let waiting = v.1;
+        log::info!(
+            "gc mark {}: start, waiting: {}, count: {}",
+            self.id,
+            waiting,
+            count
+        );
         // println!("gc mark {}: waiting: {}, count: {}", self.id, waiting, count);
         let stealers = if waiting != count {
-            GC_MARK_COND.
-            wait_while(&mut v, |(c, _, _)| {
+            GC_MARK_COND.wait_while(&mut v, |(c, _, _)| {
                 // 线程数量变化了？
                 if waiting == *c {
                     GC_MARKING.store(true, Ordering::Release);
@@ -777,11 +800,12 @@ impl Collector {
                     .unwrap()
                     .get_more_works();
             }
-            let stealers =v.2.values().cloned().collect::<Vec<_>>();
+            let stealers = v.2.values().cloned().collect::<Vec<_>>();
             GC_SWEEPPING_NUM.store(count, Ordering::Release);
             drop(v);
             stealers
         };
+        log::info!("gc mark {}: sync done", self.id);
         // println!("gc mark {}: start", self.id);
         #[cfg(feature = "gc_profile")]
         eprintln!(
@@ -794,11 +818,9 @@ impl Collector {
         #[cfg(feature = "shadow_stack")]
         {
             for (root, obj_type) in self.roots.iter() {
-                unsafe {
-                    match obj_type {
-                        ObjectType::Atomic => {}
-                        _ => (*self.queue).push((*root, *obj_type)),
-                    }
+                match obj_type {
+                    ObjectType::Atomic => {}
+                    _ => self.queue.push(SendableMarkJob::Object((*root, *obj_type))),
                 }
             }
         }
@@ -817,8 +839,8 @@ impl Collector {
                 if !fl.is_null() {
                     // self.mark_all_stucked_registers();
                     log::trace!("gc {}: tracing stucked frames", self.id);
-                    for f in unsafe{&*fl} {
-                        self.queue.push(SendableMarkJob::Frame((f.0,f.1)));
+                    for f in unsafe { &*fl } {
+                        self.queue.push(SendableMarkJob::Frame((f.0, f.1)));
                     }
                     // unsafe{self.mark_current_sp_to_pl_sp(self.stuck_sp,self.water_mark_sp);}
                 } else if sp.is_null() {
@@ -835,7 +857,7 @@ impl Collector {
                 } else {
                     // self.mark_all_stucked_registers();
                     walk_gc_frames(sp, |sp, _, f| {
-                        self.queue.push(SendableMarkJob::Frame((sp as _,f)));
+                        self.queue.push(SendableMarkJob::Frame((sp as _, f)));
                     });
                     // unsafe{self.mark_current_sp_to_pl_sp(sp,self.water_mark_sp);}
                 }
@@ -856,14 +878,35 @@ impl Collector {
         }
 
         self.mark_queue(&stealers);
-        unsafe {self.thread_local_allocator.as_mut().unwrap_unchecked().return_prev_free_blocks();}
+        unsafe {
+            self.thread_local_allocator
+                .as_mut()
+                .unwrap_unchecked()
+                .return_prev_free_blocks();
+        }
         let mut v = GC_COLLECTOR_COUNT.lock();
         v.1 -= 1;
         if v.1 != 0 {
-            GC_MARK_COND.wait_while(&mut v, |(_,w,_)| {
-                !(*w == 0)
+            log::info!(
+                "gc mark {} ending: waiting for other threads waiting: {} count: {}",
+                self.id,
+                v.1,
+                v.0
+            );
+            GC_MARK_COND.wait_while(&mut v, |(_, w, _)| {
+                log::info!(
+                    "gc mark {} ending: waiting for other threads waiting: {} ",
+                    self.id,
+                    *w
+                );
+                *w != 0
             });
         } else {
+            log::info!(
+                "gc mark {} ending: waiting for other threads waiting: {}",
+                self.id,
+                v.1
+            );
             let g = unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap() };
 
             let mut guard = g.finalizers.lock();
@@ -874,7 +917,10 @@ impl Collector {
                 let head = unsafe { block.get_head_ptr(*p) };
                 let offset_from_head = unsafe { (*p).offset_from(head) };
                 let (line_header, _) = unsafe { block.get_line_header_from_addr(head) };
-                if line_header.get_forwarded() && !line_header.is_pinned() && line_header.get_marked() {
+                if line_header.get_forwarded()
+                    && !line_header.is_pinned()
+                    && line_header.get_marked()
+                {
                     unsafe {
                         _ = self.correct_ptr(p as *mut _ as _, offset_from_head, *p);
                     }
@@ -893,13 +939,20 @@ impl Collector {
 
             GC_MARKING.store(false, Ordering::Release);
             GLOBAL_MARK_FLAG.store(false, Ordering::Release);
+            log::info!("gc {}: notify other thread mark end", self.id);
             GC_MARK_COND.notify_all();
             GC_RUNNING.store(false, Ordering::Release);
             GC_SWEEPING.store(true, Ordering::Release);
             drop(v);
-            unsafe{GLOBAL_ALLOCATOR.0.as_mut().unwrap_unchecked().sweep_big_objs()};
+            unsafe {
+                GLOBAL_ALLOCATOR
+                    .0
+                    .as_mut()
+                    .unwrap_unchecked()
+                    .sweep_big_objs()
+            };
         }
-        // println!("gc mark {}: end", self.id);
+        log::info!("gc mark {}: end", self.id);
     }
 
     fn mark_queue(&self, stealers: &[Stealer<SendableMarkJob>]) {
@@ -917,8 +970,7 @@ impl Collector {
                 let mut empty_num = 0;
                 for stealer in stealers {
                     match stealer.steal_batch(&self.queue) {
-                        Steal::Success(_) => {
-                        },
+                        Steal::Success(_) => {}
                         Steal::Empty => {
                             empty_num += 1;
                         }
@@ -960,15 +1012,6 @@ impl Collector {
             self.mark_frame(sp, f);
         });
     }
-    #[inline(always)]
-    pub fn current_sp() -> *mut u8 {
-        let sp: *mut u8;
-        unsafe {
-            asm!("mov {}, sp", out(reg) sp);
-        }
-        sp
-    }
-
 
     fn mark_frame(&self, sp: &*mut libc::c_void, f: &&Function) {
         #[cfg(not(feature = "conservative_stack_scan"))]
@@ -1052,16 +1095,15 @@ impl Collector {
         // let previous_remaining = self.status.borrow().last_gc_remaining;
         let remaining = used.0;
         let this = unsafe { *self.bytes_allocated_since_last_gc.get() };
-        if self.status.borrow().am_i_triggered {
-            if this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
-            {
-                // eprintln!("gc {}: expand {} {} {}", self.id, this, previous_threshold, remaining);
-                // expand threshold
-                self.status.borrow_mut().collect_threshold = min(
-                    (previous_threshold as f64 * THRESHOLD_PROPORTION) as usize,
-                    unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
-                );
-            }
+        if self.status.borrow().am_i_triggered
+            && this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
+        {
+            // eprintln!("gc {}: expand {} {} {}", self.id, this, previous_threshold, remaining);
+            // expand threshold
+            self.status.borrow_mut().collect_threshold = min(
+                (previous_threshold as f64 * THRESHOLD_PROPORTION) as usize,
+                unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
+            );
         }
         unsafe { *self.bytes_allocated_since_last_gc.get() = 0 };
         self.status.borrow_mut().last_gc_remaining = remaining;
@@ -1069,6 +1111,7 @@ impl Collector {
 
         let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         if v - 1 == 0 {
+            log::info!("gc {}: sweep done", self.id);
             // println!("gc sweep end {}", self.id);
             GC_SWEEPING.store(false, Ordering::Release);
         }
@@ -1109,8 +1152,6 @@ impl Collector {
         self.collect_fast_unwind(std::ptr::null_mut());
     }
 
-
-    
     /// # collect_fast_unwind
     ///
     /// Collect garbage, use stack pointer to walk gc frames.
@@ -1123,13 +1164,13 @@ impl Collector {
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn collect_fast_unwind(&self, sp: *mut u8) {
-    //         // Create a signpost interval for your function. The interval ends
-    // // when the variable goes out of scope.
-    // let _interval = signpost::begin_interval!(
-    //     LOGGER,
-    //     /* Interval ID */ self.id as _,
-    //     /* Interval name */ "collect_fast_unwind_ex",
-    // );
+        //         // Create a signpost interval for your function. The interval ends
+        // // when the variable goes out of scope.
+        // let _interval = signpost::begin_interval!(
+        //     LOGGER,
+        //     /* Interval ID */ self.id as _,
+        //     /* Interval name */ "collect_fast_unwind_ex",
+        // );
         #[cfg(feature = "gc_profile")]
         eprintln!(
             "gc {} start collect at {:?}",
@@ -1224,7 +1265,6 @@ impl Collector {
         // (Default::default(), Default::default())
     }
 
-
     /// # stuck
     ///
     /// tell the collector that the current thread is stucked.
@@ -1250,9 +1290,9 @@ impl Collector {
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn stuck_fast_unwind(&mut self, sp: *mut u8) {
-        self.former_registers = unsafe{*self.registers.get()};
+        self.former_registers = unsafe { *self.registers.get() };
         self.stuck_sp = sp;
-        log::trace!("gc {}: stucking...", self.id);
+        log::info!("gc {}: stucking...", self.id);
         let frames = self.get_frames(sp);
         let (startsender, startrecv) = channel::<()>();
         let (endsender, endreceiver) = channel::<()>();
@@ -1318,6 +1358,7 @@ impl Collector {
     }
 
     pub fn unstuck(&mut self) {
+        log::info!("gc {}: unstucking...", self.id);
         self.stuck_stop_notify_chan.send(()).unwrap();
         STUCK_COND.notify_all();
         // wait until the shadow thread exit
@@ -1331,6 +1372,7 @@ impl Collector {
                 drop(Box::from_raw(old));
             }
         }
+        log::info!("gc {}: unstuck done", self.id);
         // unsafe{update_resgisters(self.former_registers, unsafe{*self.registers.get()},self.id);}
     }
     fn get_frames(&self, sp: *mut u8) -> Vec<(*mut libc::c_void, &'static Function)> {
@@ -1349,7 +1391,6 @@ impl Collector {
         frames
     }
 }
-
 
 fn get_fn_from_frame(frame: &backtrace::Frame) -> Option<&'static Function> {
     let map = unsafe { STACK_MAP.map.as_ref() }.unwrap();

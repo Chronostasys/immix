@@ -54,15 +54,14 @@ pub trait LineHeaderExt {
 #[inline(always)]
 fn count_next_zeros(line_map: &[u8; 256], idx: usize) -> usize {
     let mut len = 0;
-    for i in idx..NUM_LINES_PER_BLOCK {
-        if line_map[i] & 1 == 0 {
+    for i in line_map.iter().take(NUM_LINES_PER_BLOCK).skip(idx) {
+        if i & 1 == 0 {
             len += 1;
         } else {
             break;
         }
     }
     len
-    
 }
 
 /// A block is a 32KB memory region.
@@ -198,8 +197,7 @@ impl LineHeaderExt for LineHeader {
 
 impl Block {
     pub fn is_exaushted(&self) -> bool {
-        self.cursor >= NUM_LINES_PER_BLOCK
-            || self.available_line_num == 0
+        self.cursor >= NUM_LINES_PER_BLOCK || self.available_line_num == 0
     }
     /// Create a new block.
     ///
@@ -284,9 +282,8 @@ impl Block {
 
         while idx < NUM_LINES_PER_BLOCK {
             if !self.line_map[idx].is_pinned() {
-                if self.line_map[idx].get_forwarded() && self.line_map[idx].get_marked()  {
+                if self.line_map[idx].get_forwarded() && self.line_map[idx].get_marked() {
                     self.line_map[idx].set_marked(false);
-                    
                 }
                 // 如果pin了，需要把记号一直保留
                 self.line_map[idx] &= !0b1100000; // unset forward bits
@@ -334,12 +331,13 @@ impl Block {
         self.cursor = first_hole_line_idx;
         self.marked = false;
         self.next_hole_size = first_hole_line_len;
-        debug_assert!(self.cursor+ self.next_hole_size >= NUM_LINES_PER_BLOCK || self.line_map[self.cursor+ self.next_hole_size] & 1 == 1);
+        debug_assert!(
+            self.cursor + self.next_hole_size >= NUM_LINES_PER_BLOCK
+                || self.line_map[self.cursor + self.next_hole_size] & 1 == 1
+        );
         self.hole_num = holes;
         debug_assert!(self.hole_num == count_holes(&self.line_map));
         debug_assert!(self.available_line_num <= NUM_LINES_PER_BLOCK - 3);
-
-
 
         self.eva_target = false;
         if let Some(count) = (*mark_histogram).get_mut(&self.hole_num) {
@@ -389,7 +387,6 @@ impl Block {
 
         None
     }
-
 
     /// # get_nth_line
     ///
@@ -535,7 +532,9 @@ impl Block {
             self.cursor += line_size;
             self.next_hole_size -= line_size;
             if self.next_hole_size == 0 {
-                debug_assert!(self.cursor>=NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1);
+                debug_assert!(
+                    self.cursor >= NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1
+                );
                 self.hole_num -= 1;
                 debug_assert!(self.hole_num == count_holes(&self.line_map));
             }
@@ -552,7 +551,7 @@ impl Block {
             let header = self.line_map.get_unchecked_mut(start);
             *header |= (obj_type as u8) << 2 | 0b10000001;
             // 标记为已使用
-            for i in (start+1)..=start - 1 + line_size {
+            for i in (start + 1)..=start - 1 + line_size {
                 let header = self.line_map.get_unchecked_mut(i);
                 header.set_used(true);
             }
@@ -561,7 +560,9 @@ impl Block {
             self.cursor = start + line_size;
             self.next_hole_size = len - line_size;
             if self.next_hole_size == 0 {
-                debug_assert!(self.cursor>=NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1);
+                debug_assert!(
+                    self.cursor >= NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1
+                );
                 self.hole_num -= 1;
                 debug_assert!(self.hole_num == count_holes(&self.line_map));
             }
@@ -573,6 +574,22 @@ impl Block {
     pub fn count_holes(&self) -> usize {
         count_holes(&self.line_map)
     }
+}
+
+pub fn count_holes(header: &[u8; 256]) -> usize {
+    let mut holes = 0;
+    let mut idx = 3;
+    while idx < NUM_LINES_PER_BLOCK {
+        if header[idx] & 1 == 0 {
+            holes += 1;
+            while idx < NUM_LINES_PER_BLOCK && header[idx] & 1 == 0 {
+                idx += 1;
+            }
+        } else {
+            idx += 1;
+        }
+    }
+    holes
 }
 
 #[cfg(test)]
@@ -614,24 +631,5 @@ mod tests {
             assert_eq!(block.hole_num, 2);
             assert_eq!(block.next_hole_size, 1);
         }
-        
     }
-}
-
-
-pub fn count_holes(header: &[u8; 256]) -> usize {
-    let mut holes = 0;
-    let mut idx = 3;
-    while idx < NUM_LINES_PER_BLOCK {
-        if header[idx] & 1 == 0 {
-            holes += 1;
-            while idx < NUM_LINES_PER_BLOCK && header[idx] & 1 == 0 {
-                idx += 1;
-            }
-        } else {
-            idx += 1;
-        }
-    }
-    holes
-    
 }

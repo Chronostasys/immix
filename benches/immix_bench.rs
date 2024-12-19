@@ -3,7 +3,6 @@ use std::{mem::size_of, ptr::null_mut, thread::available_parallelism, time::Dura
 use criterion::{criterion_group, criterion_main, Criterion};
 use immix::*;
 use libc::malloc;
-use rand::random;
 
 fn immix_benchmark_multi_thread(c: &mut Criterion) {
     // gc_disable_auto_collect();
@@ -71,10 +70,10 @@ fn immix_benchmark_single_thread_alloc(c: &mut Criterion) {
         return;
     }
     g.bench_function(
-        &"singlethread gc alloc benchmark small objects".to_string(),
+        "singlethread gc alloc benchmark small objects".to_string(),
         |b| b.iter(bench_allocation),
     );
-    g.bench_function(&"malloc benchmark small objects".to_string(), |b| {
+    g.bench_function("malloc benchmark small objects".to_string(), |b| {
         b.iter(bench_malloc)
     });
 }
