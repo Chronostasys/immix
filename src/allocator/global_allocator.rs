@@ -1,11 +1,9 @@
 use std::{
-    cell::Cell,
     collections::VecDeque,
-    sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize},
-    time::Instant,
+    sync::atomic::{AtomicU64, AtomicUsize},
 };
 
-use parking_lot::{Mutex, ReentrantMutex, RwLock};
+use parking_lot::{Mutex, RwLock};
 
 use threadpool::ThreadPool;
 
@@ -47,15 +45,13 @@ pub struct GlobalAllocator {
     /// big object mmap
     pub big_obj_allocator: BigObjAllocator,
 
-    last_get_block_time: std::time::Instant,
-
+    // last_get_block_time: std::time::Instant,
     /// 一个周期内alloc的block数减去return的block数
     /// 大于0表示内存使用量处于增加状态，小于0表示内存使用量处于减少状态
     mem_usage_flag: i64,
 
-    /// 周期计数器，每个内存总体增加周期加1，每个内存总体不变/减少周期减1
-    round: i64,
-
+    // /// 周期计数器，每个内存总体增加周期加1，每个内存总体不变/减少周期减1
+    // round: i64,
     pub pool: ThreadPool,
 
     /// a bytemap indicates whether a block is in use
@@ -68,9 +64,9 @@ pub struct GlobalAllocator {
 
 unsafe impl Sync for GlobalAllocator {}
 
-const ROUND_THRESHOLD: i64 = 10;
+// const ROUND_THRESHOLD: i64 = 10;
 
-const ROUND_MIN_TIME_MILLIS: u128 = 1000;
+// const ROUND_MIN_TIME_MILLIS: u128 = 1000;
 
 impl Drop for GlobalAllocator {
     fn drop(&mut self) {
@@ -107,9 +103,9 @@ impl GlobalAllocator {
             big_objs: RwLock::new(Vec::new()),
             lock: Mutex::new(()),
             big_obj_allocator: BigObjAllocator::new(size / 4),
-            last_get_block_time: std::time::Instant::now(),
+            // last_get_block_time: std::time::Instant::now(),
+            // round: 0,
             mem_usage_flag: 0,
-            round: 0,
             pool: ThreadPool::default(),
             unavailable_blocks: vec![],
             recycle_blocks: vec![],
@@ -256,51 +252,6 @@ impl GlobalAllocator {
     ///
     /// 从free_blocks中获取一个可用的block，如果没有可用的block，就从mmap的heap空间之中获取一个新block
     pub fn get_block(&mut self) -> *mut Block {
-        // if let Some((block, freed)) = self.free_blocks.lock().pop() {
-        //                             self.set_block_bitmap(block, true);
-        //                 unsafe{block.as_mut().unwrap_unchecked().reset_header();}
-        //     return block;
-        // }
-        // drop(_lock);
-        // let _lock = self.lock.lock();
-        // loop {
-        //     match stealer.steal() {
-        //         Steal::Empty => break,
-        //         Steal::Success((block,freed)) => {
-        //             if freed && !self.mmap.commit(block as *mut u8, BLOCK_SIZE) {
-        //                 return  std::ptr::null_mut();
-        //             } else {
-        //                 self.set_block_bitmap(block, true);
-        //                 unsafe{block.as_mut().unwrap_unchecked().reset_header();}
-        //                 let ep = start.elapsed().as_nanos();
-        //                 EP.fetch_max(ep as u64, std::sync::atomic::Ordering::Relaxed);
-        //                 return block;
-        //             }
-        //         },
-        //         Steal::Retry => continue,
-        //     }
-        // }
-        // let blocks = self.alloc_block::<32>();
-        // if let Some(bs) = blocks {
-        //     for block in bs.iter().skip(1) {
-        //         self.free_blocks.push((*block, false));
-        //     }
-        //     self.set_block_bitmap(bs[0], true);
-        //     unsafe{bs[0].as_mut().unwrap_unchecked().reset_header();}
-        //     let ep = start.elapsed().as_nanos();
-        //     EP.fetch_max(ep as u64, std::sync::atomic::Ordering::Relaxed);
-        //     bs[0]
-        // } else {
-        //     std::ptr::null_mut()
-        // }
-
-        // let b = self.current as *mut Block;
-        // unsafe{
-        //     // core::ptr::write_bytes(b as *mut u8, 0, 3*LINE_SIZE);
-        //     (*b).reset_header();
-        // }
-        // return b;
-        // self.mem_usage_flag += 1;
         let block = if let Some(block) = self.free_blocks.pop() {
             block
         } else {
@@ -399,7 +350,7 @@ impl GlobalAllocator {
         for block in eva {
             self.mem_usage_flag -= 1;
             self.set_block_bitmap(*block, false);
-            _ = self.free_blocks.push(*block);
+            self.free_blocks.push(*block);
         }
     }
 

@@ -134,7 +134,7 @@ mod _unix {
                 libc::madvise(
                     page as *mut _,
                     size as _,
-                    libc::MADV_WILLNEED | libc::MADV_SEQUENTIAL,
+                    libc::MADV_WILLNEED | libc::MADV_RANDOM,
                 ) == 0
             }
         }

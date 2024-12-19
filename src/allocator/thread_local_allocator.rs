@@ -11,7 +11,10 @@ use std::collections::VecDeque;
 use rustc_hash::FxHashMap;
 
 use crate::{
-    bigobj::BigObj, block::{Block, ObjectType}, consts::{BLOCK_SIZE, LINE_SIZE}, count_holes, HeaderExt, EVA_BLOCK_PROPORTION, NUM_LINES_PER_BLOCK
+    bigobj::BigObj,
+    block::{Block, ObjectType},
+    consts::{BLOCK_SIZE, LINE_SIZE},
+    HeaderExt, EVA_BLOCK_PROPORTION, NUM_LINES_PER_BLOCK,
 };
 
 use super::GlobalAllocator;
@@ -51,10 +54,11 @@ impl Drop for ThreadLocalAllocator {
         // eprintln!("drop thread local allocator {} eva blocks {} un blocks {} re blocks", self.eva_blocks.len(), self.unavailable_blocks.len(), self.recyclable_blocks.len());
         global_allocator.on_thread_destroy(
             &self.eva_blocks,
-            self.recyclable_blocks.drain(..).chain(self.blocks_to_return.drain(..)),
+            self.recyclable_blocks
+                .drain(..)
+                .chain(self.blocks_to_return.drain(..)),
             &self.unavailable_blocks,
         );
-        
     }
 }
 
@@ -143,17 +147,15 @@ impl ThreadLocalAllocator {
 
     pub fn fill_available_histogram(&self, histogram: &mut FxHashMap<usize, usize>) -> usize {
         let mut total_available = 0;
-        self.recyclable_blocks
-            .iter()
-            .for_each(|block| unsafe {
-                let (available, holes) = (**block).get_available_line_num_and_holes();
-                if let Some(v) = histogram.get_mut(&holes) {
-                    *v += available;
-                } else {
-                    histogram.insert(holes, available);
-                }
-                total_available += available;
-            });
+        self.recyclable_blocks.iter().for_each(|block| unsafe {
+            let (available, holes) = (**block).get_available_line_num_and_holes();
+            if let Some(v) = histogram.get_mut(&holes) {
+                *v += available;
+            } else {
+                histogram.insert(holes, available);
+            }
+            total_available += available;
+        });
         total_available
     }
 
@@ -197,9 +199,8 @@ impl ThreadLocalAllocator {
         size
     }
 
-
     pub fn should_gc(&self) -> bool {
-        unsafe { self.recyclable_blocks.is_empty() && (*self.global_allocator).should_gc()}
+        unsafe { self.recyclable_blocks.is_empty() && (*self.global_allocator).should_gc() }
     }
 
     /// # alloc
@@ -222,8 +223,8 @@ impl ThreadLocalAllocator {
         if size > ((BLOCK_SIZE / LINE_SIZE - 3) / 4 - 1) * LINE_SIZE {
             return self.big_obj_alloc(size, obj_type);
         }
-        let re = self.normal_alloc(size, obj_type);
-        re
+
+        self.normal_alloc(size, obj_type)
     }
 
     #[inline(always)]
@@ -276,10 +277,8 @@ impl ThreadLocalAllocator {
                     panic!("out of memory");
                 }
                 self.recyclable_blocks.push_back(new_block);
-                
             }
             self.curr_block = unsafe { *self.recyclable_blocks.front().unwrap_unchecked() };
-
         } else {
             self.curr_block = *f;
         }
@@ -318,7 +317,9 @@ impl ThreadLocalAllocator {
             //     debug_assert!((*new_block).find_first_hole().is_some());
             // }
             self.recyclable_blocks.push_back(new_block);
-            unsafe{self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();}
+            unsafe {
+                self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();
+            }
         }
         re
     }
@@ -341,9 +342,13 @@ impl ThreadLocalAllocator {
     }
 
     pub fn big_obj_from_ptr(&mut self, ptr: *mut u8) -> Option<*mut BigObj> {
-        unsafe{self.global_allocator.as_mut().unwrap_unchecked().big_obj_from_ptr(ptr)}
+        unsafe {
+            self.global_allocator
+                .as_mut()
+                .unwrap_unchecked()
+                .big_obj_from_ptr(ptr)
+        }
     }
-
 
     pub fn return_prev_free_blocks(&mut self) {
         let global_allocator = unsafe { &mut *self.global_allocator };
@@ -360,14 +365,12 @@ impl ThreadLocalAllocator {
     fn get_new_block(&mut self) -> *mut Block {
         let b = if self.collect_mode && !self.eva_blocks.is_empty() {
             self.eva_blocks.pop().unwrap()
+        } else if let Some(b) = self.blocks_to_return.pop() {
+            b
+        } else if self.collect_mode {
+            unsafe { (*self.global_allocator).get_block_locked() }
         } else {
-            if let Some(b) = self.blocks_to_return.pop() {
-                b
-            }else if self.collect_mode {
-                unsafe { (*self.global_allocator).get_block_locked() }   
-            }else {
-                unsafe { (*self.global_allocator).get_block() }   
-            }
+            unsafe { (*self.global_allocator).get_block() }
         };
 
         unsafe { b.as_mut().map(|b| b.set_eva_threshold(NUM_LINES_PER_BLOCK)) };
@@ -426,7 +429,7 @@ impl ThreadLocalAllocator {
         }
 
         // order recycle blocks by address
-        recyclable_blocks.make_contiguous().sort_unstable_by(|a, b| a.cmp(b));
+        recyclable_blocks.make_contiguous().sort_unstable();
         self.recyclable_blocks = recyclable_blocks;
         self.unavailable_blocks = unavailable_blocks;
         let total_block_num =
@@ -435,8 +438,8 @@ impl ThreadLocalAllocator {
         if self.eva_blocks.len() > head_room_size {
             // 把多的加到free_blocks
             let over_flow = self.eva_blocks.len() - head_room_size;
-            for _ in 0..over_flow  {
-                unsafe{
+            for _ in 0..over_flow {
+                unsafe {
                     let b = self.eva_blocks.pop().unwrap_unchecked();
                     (*b).reset_header();
                     free_blocks.push(b);
@@ -453,19 +456,26 @@ impl ThreadLocalAllocator {
                 }
             }
         }
-        debug_assert!(free_blocks.iter().filter(|b| unsafe{b.as_mut().unwrap().get_available_line_num_and_holes().0 > NUM_LINES_PER_BLOCK}) .count() == 0);
-        free_blocks.sort_unstable_by(|a, b| a.cmp(b));
+        debug_assert!(
+            free_blocks
+                .iter()
+                .filter(|b| unsafe {
+                    b.as_mut().unwrap().get_available_line_num_and_holes().0 > NUM_LINES_PER_BLOCK
+                })
+                .count()
+                == 0
+        );
+        free_blocks.sort_unstable();
         self.blocks_to_return = free_blocks;
 
-
-        let curr  = self.recyclable_blocks.front().cloned();
+        let curr = self.recyclable_blocks.front().cloned();
         if curr.is_none() {
             self.curr_block = self.get_new_block();
             self.recyclable_blocks.push_back(self.curr_block);
         } else {
-            self.curr_block = unsafe{curr.unwrap_unchecked()};
+            self.curr_block = unsafe { curr.unwrap_unchecked() };
         }
-        
+
         let used_lines = total_used * LINE_SIZE;
         (used_lines, free_lines * LINE_SIZE)
     }

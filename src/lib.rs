@@ -1,9 +1,13 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::missing_safety_doc)]
+#![allow(clippy::needless_range_loop)]
 use std::{
-    cell::UnsafeCell, os::raw::c_void, sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering}, mpsc::{sync_channel, SyncSender}, Arc
-    }
+    cell::UnsafeCell,
+    os::raw::c_void,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use crossbeam_deque::Stealer;
@@ -34,7 +38,6 @@ pub use consts::*;
 use parking_lot::{Condvar, Mutex};
 #[cfg(feature = "llvm_stackmap")]
 use rustc_hash::FxHashMap;
-use rustc_hash::FxHashSet;
 
 thread_local! {
     pub static SPACE: UnsafeCell<Collector> = unsafe {
@@ -73,10 +76,7 @@ pub struct StackMapWrapper {
 unsafe impl Sync for StackMapWrapper {}
 #[cfg(feature = "llvm_stackmap")]
 unsafe impl Send for StackMapWrapper {}
-const DEFAULT_HEAP_SIZE: usize = 1024 * 1024 * 1024 * 16; 
-use std::sync::{
-    mpsc::{channel, Receiver, Sender}
-};
+const DEFAULT_HEAP_SIZE: usize = 1024 * 1024 * 1024 * 16;
 lazy_static! {
     pub static ref GLOBAL_ALLOCATOR: GAWrapper = unsafe {
         let mut heap_size = DEFAULT_HEAP_SIZE;
@@ -137,7 +137,7 @@ pub fn print_block_time() {
     })
 }
 
-pub fn set_high_sp(sp:*mut u8) {
+pub fn set_high_sp(sp: *mut u8) {
     SPACE.with(|gc| {
         let gc = unsafe { gc.get().as_mut().unwrap() };
         gc.set_high_sp(sp);
@@ -162,7 +162,6 @@ pub fn gc_malloc_fast_unwind(size: usize, obj_type: u8, sp: *mut u8) -> *mut u8 
     })
 }
 
-
 #[inline(always)]
 pub fn gc_malloc_fast_unwind_ex(
     mut space: *mut *mut Collector,
@@ -170,7 +169,6 @@ pub fn gc_malloc_fast_unwind_ex(
     obj_type: u8,
     sp: *mut u8,
 ) -> *mut u8 {
-
     // SLOW_PATH_COUNT.fetch_add(1, Ordering::Relaxed);
     // gc_malloc_fast_unwind(size, obj_type, sp)
     if unsafe { *space }.is_null() {
@@ -207,14 +205,7 @@ pub fn gc_malloc_fast_unwind_ex(
         // unsafe{gc.as_mut().unwrap().update_resgisters();};
         re
     }
-
 }
-
-
-
-
-
-
 
 /// # gc_malloc_no_collect
 ///
@@ -390,7 +381,7 @@ pub fn thread_stuck_start_fast(sp: *mut u8) {
     // v.0 -= 1;
     SPACE.with(|gc| {
         let gc = unsafe { gc.get().as_mut().unwrap() };
-        
+
         // let regs = Collector::get_registers();
         // gc.set_registers(regs);
         gc.stuck_fast_unwind(sp)
@@ -462,8 +453,7 @@ pub fn set_evacuation(eva: bool) {
 
 pub struct GAWrapper(*mut GlobalAllocator);
 
-impl GAWrapper {
-}
+impl GAWrapper {}
 
 enum SendableMarkJob {
     Frame((*mut c_void, &'static Function)),
@@ -521,8 +511,14 @@ const GC_AUTOCOLLECT_ENABLE: bool = false;
 unsafe impl Sync for GAWrapper {}
 
 pub fn get_gc_stw_num() -> usize {
-    eprintln!("alloc ep: {}ns", EP.load(std::sync::atomic::Ordering::Relaxed));
-    eprintln!("slowpath time {}", SLOW_PATH_COUNT.load(std::sync::atomic::Ordering::Relaxed));
+    eprintln!(
+        "alloc ep: {}ns",
+        EP.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    eprintln!(
+        "slowpath time {}",
+        SLOW_PATH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    );
     GC_STW_COUNT.load(Ordering::SeqCst)
 }
 
@@ -538,5 +534,5 @@ pub unsafe fn set_shadow_stack_addr(addr: *mut u8) {
 pub fn exit_block() {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
     let mut v = GC_COLLECTOR_COUNT.lock();
-    GC_MARK_COND.wait_while(&mut v, |(c, _,_)| *c == 0);
+    GC_MARK_COND.wait_while(&mut v, |(c, _, _)| *c == 0);
 }

@@ -1,4 +1,4 @@
-use std::{os::raw::c_void, process::exit, time::Instant};
+use std::process::exit;
 
 use crate::{gc_malloc_fast_unwind, gc_malloc_fast_unwind_ex, gc_malloc_no_collect, Collector};
 use backtrace::Backtrace;
@@ -117,20 +117,14 @@ pub unsafe extern "C" fn DioGC__malloc_slowpath(
     gc_malloc_fast_unwind_ex(space, size as _, obj_type, rsp as _)
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn gc_set_handle(
-    space: *mut *mut Collector,
-)  {
+pub unsafe extern "C" fn gc_set_handle(space: *mut *mut Collector) {
     if unsafe { *space }.is_null() {
         crate::SPACE.with(|gc1| {
-            {
-                let gc = gc1.get();
-                unsafe { *space = gc }
-
-            }
+            let gc = gc1.get();
+            unsafe { *space = gc }
         });
-    }   
+    }
 }
 
 #[no_mangle]
@@ -193,7 +187,7 @@ pub unsafe extern "C" fn DioGC__set_eva(eva: i32) {
     DioGC::set_eva(eva)
 }
 #[no_mangle]
-pub unsafe extern "C" fn DioGC__safepoint_ex(sp: *mut u8,    space: *mut Collector) {
+pub unsafe extern "C" fn DioGC__safepoint_ex(sp: *mut u8, space: *mut Collector) {
     crate::safepoint_fast_unwind_ex(sp, space);
 }
 #[no_mangle]
@@ -211,25 +205,23 @@ pub unsafe extern "C" fn gc_print_block_time() {
     crate::print_block_time()
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn gc_set_high_sp(sp:*mut u8) {
+pub unsafe extern "C" fn gc_set_high_sp(sp: *mut u8) {
     crate::set_high_sp(sp);
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn start_nano() -> u64 {
     use std::time::SystemTime;
-    let duration_since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    let duration_since_epoch = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
     let timestamp_nanos = duration_since_epoch.as_nanos(); // u128
     timestamp_nanos as u64
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn record_eplased(start: u64) {
     let end = start_nano();
     crate::EP.fetch_add(end - start, std::sync::atomic::Ordering::Relaxed);
 }
-

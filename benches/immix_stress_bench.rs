@@ -1,4 +1,4 @@
-use std::{mem::size_of, thread::available_parallelism, time::Duration};
+use std::{mem::size_of, thread::available_parallelism};
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use immix::*;
