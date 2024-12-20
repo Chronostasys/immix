@@ -24,6 +24,7 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
 
 #include "llvm-c/Types.h"
 #include "llvm-c/BitWriter.h"
@@ -205,6 +206,7 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
         O = OptimizationLevel::O0;
         MPM.addPass(PB.buildO0DefaultPipeline(O));
         MPM.addPass(EscapePass(print_escaped == 1, true));
+        MPM.addPass(AlwaysInlinerPass());
         break;
     case 1:
         O = OptimizationLevel::O1;
@@ -212,6 +214,8 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
         FPM = PB.buildFunctionSimplificationPipeline(O, ThinOrFullLTOPhase::None);
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
         MPM.addPass(EscapePass(print_escaped == 1, true));
+        // PB.parsePassPipeline(MPM, "always-inline");
+        MPM.addPass(AlwaysInlinerPass());
         break;
     case 2:
         O = OptimizationLevel::O2;
@@ -219,6 +223,8 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
         FPM = PB.buildFunctionSimplificationPipeline(O, ThinOrFullLTOPhase::None);
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
         MPM.addPass(EscapePass(print_escaped == 1, true));
+        // PB.parsePassPipeline(MPM, "always-inline");
+        MPM.addPass(AlwaysInlinerPass());
         break;
     case 3:
         O = OptimizationLevel::O3;
@@ -240,6 +246,8 @@ extern "C" void run_module_pass(LLVMModuleRef  M, int opt, int debug, int print_
         FPM = PB.buildFunctionSimplificationPipeline(O, ThinOrFullLTOPhase::None);
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
         MPM.addPass(EscapePass(print_escaped == 1, true));
+        // PB.parsePassPipeline(MPM, "always-inline");
+        MPM.addPass(AlwaysInlinerPass());
         break;
     }
     MPM.addPass(RewriteStatepointsForGC());

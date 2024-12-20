@@ -122,6 +122,15 @@ pub unsafe extern "C" fn DioGC__malloc_slowpath(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn DioGC__malloc_slowpath_jit(
+    size: u64,
+    obj_type: u8,
+    rsp: *mut *mut u8,
+) -> *mut u8 {
+    gc_malloc_fast_unwind(size as _, obj_type, rsp as _)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn gc_set_handle(space: *mut *mut Collector) {
     if unsafe { *space }.is_null() {
         crate::SPACE.with(|gc1| {
@@ -129,6 +138,11 @@ pub unsafe extern "C" fn gc_set_handle(space: *mut *mut Collector) {
             unsafe { *space = gc }
         });
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gc_get_handle() -> *mut Collector {
+    crate::SPACE.with(|gc| gc.get())
 }
 
 #[no_mangle]

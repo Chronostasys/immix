@@ -74,6 +74,10 @@ public:
     return Mangle(Name);
   }
 
+  void dump() {
+    ES->dump(errs());
+  }
+
   Expected<JITDylib &> loadPlatformDynamicLibrary(const char *Path) {
     auto G = EPCDynamicLibrarySearchGenerator::Load(*ES, Path);
     if (!G)
@@ -330,6 +334,7 @@ extern "C"
     auto FNS = mod->functions();
     // find ends with "..__init_global"
     auto init_global = std::find_if(FNS.begin(), FNS.end(), [](Function &F) {
+      // printf("function name %s\n", F.getName().str().c_str());
       return F.getName().endswith("..__init_global");
     });
     InitFns.push_back(new std::string(init_global->getName()));
@@ -337,8 +342,10 @@ extern "C"
     auto TSM = ThreadSafeModule(std::move(mod),std::move(ctx));
     ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
     ResourceMap[ModId] = RT;
+    // TheJIT->dump();
     // // run init global
-    // auto ExprSymbol = ExitOnErr(TheJIT->lookup(init_global->getName()));
+    // auto ExprSymbol = ExitOnErr(TheJIT->lookup("DioGC__malloc"));
+    // printf("malloc ptr %p\n", ExprSymbol.getAddress().toPtr<void (*)()>());
     // void (*FP)() = ExprSymbol.getAddress().toPtr<void (*)()>();
     // FP();
   }
@@ -384,6 +391,11 @@ extern "C"
       // pop all init fns, run them
       for (auto &fn : InitFns)
       {
+        if (fn->empty())
+        {
+          continue;
+        }
+        
         auto ExprSymbol = ExitOnErr(TheJIT->lookup(*fn));
         void (*FP)() = ExprSymbol.getAddress().toPtr<void (*)()>();
         FP();

@@ -857,6 +857,7 @@ impl Collector {
                 } else {
                     // self.mark_all_stucked_registers();
                     walk_gc_frames(sp, |sp, _, f| {
+                        // eprintln!("gc {} mark frame {:p} {:?}", self.id,sp, f);
                         self.queue.push(SendableMarkJob::Frame((sp as _, f)));
                     });
                     // unsafe{self.mark_current_sp_to_pl_sp(sp,self.water_mark_sp);}

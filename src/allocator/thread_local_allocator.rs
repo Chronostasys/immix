@@ -77,12 +77,12 @@ impl ThreadLocalAllocator {
     /// * `global_allocator` - global allocator
     pub fn new(global_allocator: *mut GlobalAllocator) -> Self {
         Self {
+            curr_block: unsafe { global_allocator.as_mut().unwrap().get_block() },
             global_allocator,
             unavailable_blocks: Vec::new(),
             recyclable_blocks: VecDeque::new(),
             eva_blocks: Vec::new(),
             collect_mode: false,
-            curr_block: std::ptr::null_mut(),
             blocks_to_return: Vec::new(),
         }
     }
