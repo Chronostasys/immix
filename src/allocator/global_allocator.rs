@@ -213,7 +213,7 @@ impl GlobalAllocator {
             }
             blocks
         };
-
+        // eprintln!("total blocks allocated: {}",  (current as usize - self.heap_start as usize) / BLOCK_SIZE);
         Some(blocks)
     }
 
@@ -253,6 +253,7 @@ impl GlobalAllocator {
     /// 从free_blocks中获取一个可用的block，如果没有可用的block，就从mmap的heap空间之中获取一个新block
     pub fn get_block(&mut self) -> *mut Block {
         let block = if let Some(block) = self.free_blocks.pop() {
+            // eprintln!("get block from free list");
             block
         } else {
             self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
@@ -366,6 +367,7 @@ impl GlobalAllocator {
     /// 判断一个指针是否在heap之中
     pub fn in_heap(&self, ptr: *mut u8) -> bool {
         ptr >= self.heap_start
+            && ptr < (self.heap_end)
             && ptr < (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8)
             && self.get_ptr_bitmap(ptr)
     }

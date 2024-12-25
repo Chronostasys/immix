@@ -157,11 +157,11 @@ namespace
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
     void correctPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, llvm::IRBuilder<> &builder, llvm::Module &M, std::vector<llvm::PHINode *> &phis);
     void hasPhi(llvm::iterator_range<llvm::Value::use_iterator> &uses, bool &skip, int level);
-    void replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls);
+    void replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemIntrinsic *> &memsets, std::vector<llvm::CallInst *> &calls);
     /*
       Regenerate the gep instructions with new address space
     */
-    void replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *alloca, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls);
+    void replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *alloca, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemIntrinsic *> &memsets, std::vector<llvm::CallInst *> &calls);
     bool are_phis_replacable(llvm::iterator_range<llvm::Value::use_iterator> &uses, int level);
     bool is_replacable(llvm::Value *value);
     bool replaceNocapturedParams(Function &F);
@@ -204,7 +204,7 @@ namespace
       std::vector<PHINode *> phis;
       std::vector<AllocaInst *> allocas;
       std::vector<GetElementPtrInst *> geps;
-      std::vector<MemSetInst *> memsets;
+      std::vector<MemIntrinsic *> memsets;
       std::vector<AddrSpaceCastInst *> addrspaces;
       // find all gc atomic type allocations, analysis to get non-escaped set.
       for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
@@ -318,6 +318,7 @@ namespace
                     {
                       replaceCallArgsAddrspaces(U, builder, &alloca, M, memsets, calls);
                     }
+
                     allocas.push_back(&alloca);
 
                     mallocs.push_back(call);
@@ -360,13 +361,6 @@ namespace
         if (gep->getParent())
         {
           gep->eraseFromParent();
-        }
-      }
-      for (auto *memset : memsets)
-      {
-        if (memset->getParent())
-        {
-          memset->eraseFromParent();
         }
       }
       for (auto FB = M.functions().begin(), FE = M.functions().end(); FB != FE; ++FB)
@@ -420,6 +414,13 @@ namespace
         if (address->getParent())
         {
           address->eraseFromParent();
+        }
+      }
+      for (auto *memset : memsets)
+      {
+        if (memset->getParent())
+        {
+          memset->eraseFromParent();
         }
       }
     }
@@ -525,7 +526,7 @@ namespace
     }
   }
 
-  void EscapePass::replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls)
+  void EscapePass::replaceCallArgsAddrspaces(llvm::User *U, llvm::IRBuilder<> &builder, llvm::Value *alloca, llvm::Module &M, std::vector<llvm::MemIntrinsic *> &memsets, std::vector<llvm::CallInst *> &calls)
   {
     if (auto *memset = dyn_cast<MemSetInst>(U))
     {
@@ -538,10 +539,20 @@ namespace
       memset->replaceAllUsesWith(newmemset);
       memsets.push_back(memset);
     }
+        if (auto *memset = dyn_cast<MemMoveInst>(U))
+    {
+      auto *dest = memset->getDest();
+      auto *len = memset->getLength();
+      builder.SetInsertPoint(memset);
+
+      auto *newmemset = builder.CreateMemMove(dest,memset->getDestAlign(),alloca,memset->getSourceAlign(), len, memset->isVolatile());
+      memset->replaceAllUsesWith(alloca);
+      memsets.push_back(memset);
+    }
 
   }
 
-  void EscapePass::replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *ptr, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemSetInst *> &memsets, std::vector<llvm::CallInst *> &calls)
+  void EscapePass::replace_geps(llvm::iterator_range<llvm::Value::user_iterator> &users, llvm::IRBuilder<> &builder, llvm::Value *ptr, std::vector<llvm::GetElementPtrInst *> &geps, llvm::Module &M, std::vector<llvm::MemIntrinsic *> &memsets, std::vector<llvm::CallInst *> &calls)
   {
     for (auto *U : users)
     {
@@ -644,7 +655,7 @@ namespace
       std::vector<PHINode *> phis;
       std::vector<AllocaInst *> allocas;
       std::vector<GetElementPtrInst *> geps;
-      std::vector<MemSetInst *> memsets;
+      std::vector<MemIntrinsic *> memsets;
     // assert(F.getFunctionType()->isVarArg() && "Function isn't varargs!");
     if (F.isDeclaration())
       return false;
@@ -891,7 +902,6 @@ namespace
       auto noMorePhi = true;
       for (auto &U : uses)
       {
-
         auto *user = U.getUser();
         // if it's phi
         if (auto *phi = dyn_cast<PHINode>(user))

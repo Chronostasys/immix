@@ -246,10 +246,10 @@ impl Collector {
     ///
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
+        // let start = Instant::now();
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
-        // let start = Instant::now();
         let ptr = self.alloc_no_collect(size, obj_type);
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if ptr.is_null() {
@@ -841,6 +841,7 @@ impl Collector {
                     log::trace!("gc {}: tracing stucked frames", self.id);
                     for f in unsafe { &*fl } {
                         self.queue.push(SendableMarkJob::Frame((f.0, f.1)));
+                        // self.mark_frame(&(f.0 as _), &f.1);
                     }
                     // unsafe{self.mark_current_sp_to_pl_sp(self.stuck_sp,self.water_mark_sp);}
                 } else if sp.is_null() {
@@ -859,6 +860,7 @@ impl Collector {
                     walk_gc_frames(sp, |sp, _, f| {
                         // eprintln!("gc {} mark frame {:p} {:?}", self.id,sp, f);
                         self.queue.push(SendableMarkJob::Frame((sp as _, f)));
+                        // self.mark_frame(&(sp as _), &f);
                     });
                     // unsafe{self.mark_current_sp_to_pl_sp(sp,self.water_mark_sp);}
                 }
@@ -1106,6 +1108,11 @@ impl Collector {
                 unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
             );
         }
+        //  else if  remaining <= (previous_threshold as f64 / crate::USED_SPACE_DIVISOR as f64) as usize {
+        //         // shrink threshold
+        //         self.status.borrow_mut().collect_threshold =
+        //             (previous_threshold as f64 * crate::SHRINK_PROPORTION) as usize;
+        //     }
         unsafe { *self.bytes_allocated_since_last_gc.get() = 0 };
         self.status.borrow_mut().last_gc_remaining = remaining;
         self.status.borrow_mut().am_i_triggered = false;

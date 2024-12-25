@@ -274,7 +274,7 @@ impl ThreadLocalAllocator {
                 // 如果recyclable blocks为空，申请新的block
                 let new_block = self.get_new_block();
                 if new_block.is_null() {
-                    panic!("out of memory");
+                    return std::ptr::null_mut();
                 }
                 self.recyclable_blocks.push_back(new_block);
             }
@@ -422,6 +422,7 @@ impl ThreadLocalAllocator {
                         unavailable_blocks.push(block);
                     }
                 } else {
+                    free_lines += NUM_LINES_PER_BLOCK - 3;
                     block.as_mut().unwrap_unchecked().reset_header();
                     free_blocks.push(block);
                 }
