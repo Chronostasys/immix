@@ -247,6 +247,12 @@ impl Collector {
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
         // let start = Instant::now();
+        unsafe {
+            self.thread_local_allocator
+                .as_mut()
+                .unwrap_unchecked()
+                .mv_exausted_blocks();
+        }
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
@@ -806,6 +812,12 @@ impl Collector {
             stealers
         };
         log::info!("gc mark {}: sync done", self.id);
+        unsafe {
+            self.thread_local_allocator
+                .as_mut()
+                .unwrap_unchecked()
+                .return_prev_free_blocks();
+        }
         // println!("gc mark {}: start", self.id);
         #[cfg(feature = "gc_profile")]
         eprintln!(
@@ -881,12 +893,6 @@ impl Collector {
         }
 
         self.mark_queue(&stealers);
-        unsafe {
-            self.thread_local_allocator
-                .as_mut()
-                .unwrap_unchecked()
-                .return_prev_free_blocks();
-        }
         let mut v = GC_COLLECTOR_COUNT.lock();
         v.1 -= 1;
         if v.1 != 0 {

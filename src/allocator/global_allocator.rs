@@ -221,7 +221,7 @@ impl GlobalAllocator {
         unsafe {
             let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8)
                 .add(BLOCK_SIZE * 32);
-            p >= self.heap_end && self.free_blocks.is_empty()
+            p >= self.heap_end && self.free_blocks.len() < 32
         }
     }
 

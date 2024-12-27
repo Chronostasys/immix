@@ -200,7 +200,11 @@ impl ThreadLocalAllocator {
     }
 
     pub fn should_gc(&self) -> bool {
-        unsafe { self.recyclable_blocks.is_empty() && (*self.global_allocator).should_gc() }
+        unsafe {
+            self.recyclable_blocks.is_empty()
+                && self.blocks_to_return.is_empty()
+                && (*self.global_allocator).should_gc()
+        }
     }
 
     /// # alloc
@@ -387,6 +391,17 @@ impl ThreadLocalAllocator {
         unsafe { (*self.global_allocator).in_big_heap(ptr) }
     }
 
+    pub fn mv_exausted_blocks(&mut self) {
+        unsafe {
+            if !self.recyclable_blocks.is_empty()
+                && (**self.recyclable_blocks.front().unwrap_unchecked()).is_exaushted()
+            {
+                self.unavailable_blocks
+                    .push(self.recyclable_blocks.pop_front().unwrap_unchecked());
+            }
+        }
+    }
+
     /// # sweep
     ///
     /// Iterate all blocks, if a block is not marked, free it.
@@ -471,7 +486,10 @@ impl ThreadLocalAllocator {
 
         let curr = self.recyclable_blocks.front().cloned();
         if curr.is_none() {
-            self.curr_block = self.get_new_block();
+            self.curr_block = self.blocks_to_return.pop().unwrap_or(self.get_new_block());
+            if self.curr_block.is_null() {
+                panic!("OOM! GC does not free enough memory!");
+            }
             self.recyclable_blocks.push_back(self.curr_block);
         } else {
             self.curr_block = unsafe { curr.unwrap_unchecked() };

@@ -48,6 +48,14 @@ impl<T: Copy> Freelist<T> {
     pub fn is_empty(&self) -> bool {
         self.inner.cursor.load(Ordering::Relaxed) < 0
     }
+    pub fn len(&self) -> usize {
+        let cursor = self.inner.cursor.load(Ordering::Relaxed);
+        if cursor < 0 {
+            0
+        } else {
+            cursor as usize + 1
+        }
+    }
 
     pub fn pop_n<const N: usize>(&self, dest: &mut VecDeque<T>) -> Result<(), ()> {
         let inner = &self.inner;
