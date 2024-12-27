@@ -36,7 +36,7 @@ name = "immix_stress_bench"
 harness = false
 
 [features]
-default = ["madv_dontneed", "auto_gc", "llvm_stackmap", "c-api", "conservative_stack_scan", "llvm_gc_plugin_lib", "llvm_gc_plugin"]
+default = ["madv_dontneed", "auto_gc", "llvm_stackmap", "c-api", "conservative_stack_scan"]
 madv_free = []
 c-api = []
 madv_dontneed = []
