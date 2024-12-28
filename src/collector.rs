@@ -25,7 +25,7 @@ use crate::{
     gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, SendableMarkJob, ENABLE_EVA,
     FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING,
     GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK,
-    REMAIN_MULTIPLIER, SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
+    SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
 };
 
 pub static SLOW_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -277,11 +277,7 @@ impl Collector {
             return;
         }
         let mut status = self.status.borrow_mut();
-        if (unsafe { *self.bytes_allocated_since_last_gc.get() }
-            + status.last_gc_remaining * REMAIN_MULTIPLIER
-            >= status.collect_threshold
-            && !GC_SWEEPING.load(Ordering::Acquire))
-            || (unsafe {
+        if  (unsafe {
                 self.thread_local_allocator
                     .as_mut()
                     .unwrap_unchecked()
@@ -421,12 +417,14 @@ impl Collector {
             np
         );
         // eprintln!(
-        //     "gc {} correct ptr result: {:?} in {:p} from  {:p} to {:p}",
+        //     "gc {} correct ptr result: {:?} in {:p} from  {:p} to {:p} offset {}, {:p}",
         //     self.id,
         //     re,
         //     father,
         //     origin_ptr,
-        //     np
+        //     np,
+        //     offset,
+        //     *father
         // );
         re
     }
@@ -451,13 +449,20 @@ impl Collector {
                 if head.is_null() {
                     return;
                 }
-                let (_, mut idx) = block.get_line_header_from_addr(head);
+                let (header, mut idx) = block.get_line_header_from_addr(head);
+                header.set_marked(true);
                 // walk from head to end
                 // let mut line_header = line_header;
                 loop {
                     let ptr = block.get_nth_line(idx);
                     for i in 0..LINE_SIZE / 8 {
                         let p = ptr.add(i * 8);
+                        if p >= block.get_cursor() {
+                            // important: we may continue to allocate in this block,
+                            // so we should stop at cursor to make sure we don't falsely
+                            // mark a space that's not allocated yet.
+                            return;
+                        }
                         self.mark_ptr(p);
                     }
 
@@ -565,8 +570,8 @@ impl Collector {
 
                     // 将新指针写入老数据区开头
                     (*atomic_ptr).store(new_ptr, Ordering::SeqCst);
-                    // eprintln!("gc {}: father {:p} eva {:p} to {:p}",self.id, father, head, new_ptr);
                     log::trace!("gc {}: eva {:p} to {:p}", self.id, head, new_ptr);
+                    // eprintln!("gc {}: eva {:p} to {:p}", self.id, head, new_ptr);
                     debug_assert!(!new_line_header.get_marked());
                     debug_assert!(!new_line_header.get_forwarded());
                     new_line_header.set_marked(true);
@@ -1012,14 +1017,13 @@ impl Collector {
         #[cfg(target_arch = "x86_64")]
         let frame_size = f.frame_size + 8;
         #[cfg(feature = "conservative_stack_scan")]
-        for i in 0..=frame_size / 8 {
+        for i in 0..(frame_size+7) / 8 {
             self.mark_stack_offset(*sp as _, i * 8);
         }
     }
 
     #[cfg(feature = "llvm_stackmap")]
     fn mark_globals(&self) {
-        use int_enum::IntEnum;
 
         if GLOBAL_MARK_FLAG
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1032,28 +1036,9 @@ impl Collector {
                     .unwrap()
                     .iter()
                     .for_each(|(root, size)| {
-                        log::debug!(
-                            "gc {}: mark global {:p} {:p} {:p}",
-                            self.id,
-                            *root,
-                            *((*root) as *mut *mut u8),
-                            {
-                                if self
-                                    .thread_local_allocator
-                                    .as_mut()
-                                    .unwrap()
-                                    .in_heap(*((*root) as *mut *mut u8) as _)
-                                {
-                                    **((*root) as *mut *mut *mut u8)
-                                } else {
-                                    std::ptr::null_mut()
-                                }
-                            }
-                        );
-                        for i in 0..=(*size)/8 {
-                            self.mark_stack_offset(*root, i);
+                        for i in 0..(*size+7)/8 {
+                            self.mark_stack_offset(*root, i*8);
                         }
-
                     });
             }
         }
@@ -1246,6 +1231,7 @@ impl Collector {
         //     self.thread_local_allocator.as_ref().unwrap().verify();
         // }
         status.collecting = false;
+        // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         // status.total_stuck_time += start.elapsed();
         // (Default::default(), Default::default())
     }
