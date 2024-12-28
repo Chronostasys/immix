@@ -146,6 +146,9 @@ impl ThreadLocalAllocator {
     }
 
     pub fn fill_available_histogram(&self, histogram: &mut FxHashMap<usize, usize>) -> usize {
+        if let Some(b) = self.recyclable_blocks.front() {
+            unsafe { (**b).count_holes_and_avai_lines(); }
+        }
         let mut total_available = 0;
         self.recyclable_blocks.iter().for_each(|block| unsafe {
             let (available, holes) = (**block).get_available_line_num_and_holes();
@@ -228,11 +231,11 @@ impl ThreadLocalAllocator {
             return self.big_obj_alloc(size, obj_type);
         }
 
-        self.normal_alloc(size, obj_type)
+        self.normal_alloc(size)
     }
 
     #[inline(always)]
-    fn normal_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+    fn normal_alloc(&mut self, size: usize) -> *mut u8 {
         // mid size object & small size object
         // 刚启动或者recycle block全用光了
         if self.recyclable_blocks.is_empty() {
@@ -240,53 +243,39 @@ impl ThreadLocalAllocator {
             if block.is_null() {
                 return std::ptr::null_mut();
             }
-            debug_assert!(!unsafe { block.as_ref().unwrap() }.is_eva_candidate());
             self.recyclable_blocks.push_back(block);
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
         unsafe {
-            while ((**f).is_eva_candidate() && self.collect_mode) || (**f).is_exaushted() {
+            while (**f).is_eva_candidate() && self.collect_mode  {
                 let uf = self.recyclable_blocks.pop_front().unwrap_unchecked();
                 self.unavailable_blocks.push(uf);
                 let ff = self.recyclable_blocks.front();
                 if let Some(ff) = ff {
                     f = ff;
                 } else {
-                    return self.normal_alloc(size, obj_type);
+                    return self.normal_alloc(size);
                 }
             }
         }
         debug_assert!(!unsafe { f.as_ref().unwrap() }.is_eva_candidate());
-        let res = unsafe { (**f).alloc_old(size, obj_type) };
-        // return std::ptr::null_mut();
-        if res.is_none() {
-            // if size <= LINE_SIZE {
-            //     unsafe{ (**f).show();}
-            //     panic!("mid size object alloc failed");
-            // }
-            debug_assert!(size > LINE_SIZE);
-            // mid size object alloc failed, try to overflow_alloc
-            return self.overflow_alloc(size, obj_type);
+        let res = unsafe { (**f).alloc(size) };
+
+        match res {
+            crate::AllocResult::Success(p) => {
+                p
+            },
+            crate::AllocResult::Fail => {
+                debug_assert!(size > LINE_SIZE);
+                // mid size object alloc failed, try to overflow_alloc
+                return self.overflow_alloc(size);
+            },
+            crate::AllocResult::Exauted => {
+                unsafe{self.unavailable_blocks.push(self.recyclable_blocks.pop_front().unwrap_unchecked());}
+                return self.normal_alloc(size);
+
+            },
         }
-        let (s, nxt) = res.unwrap();
-        let re = unsafe { (**f).get_nth_line(s) };
-        if !nxt {
-            // 当前block被用完，将它从recyclable blocks中移除，加入unavailable blocks
-            let used_block = unsafe { self.recyclable_blocks.pop_front().unwrap_unchecked() };
-            self.unavailable_blocks.push(used_block);
-            if self.recyclable_blocks.is_empty() {
-                // 如果recyclable blocks为空，申请新的block
-                let new_block = self.get_new_block();
-                if new_block.is_null() {
-                    return std::ptr::null_mut();
-                }
-                self.recyclable_blocks.push_back(new_block);
-            }
-            self.curr_block = unsafe { *self.recyclable_blocks.front().unwrap_unchecked() };
-        } else {
-            self.curr_block = *f;
-        }
-        re
     }
 
     /// # overflow_alloc
@@ -300,7 +289,7 @@ impl ThreadLocalAllocator {
     /// ## Return
     ///
     /// * `*mut u8` - object pointer
-    pub fn overflow_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+    pub fn overflow_alloc(&mut self, size: usize) -> *mut u8 {
         // eprintln!("overflow alloc");
         // 获取新block
         let new_block = self.get_new_block();
@@ -309,21 +298,18 @@ impl ThreadLocalAllocator {
         }
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
-        let (s, nxt) = unsafe { (*new_block).alloc_old(size, obj_type).unwrap() };
-        let re = unsafe { (*new_block).get_nth_line(s) };
-        if !nxt {
-            // // new_block被用完，将它加入unavailable blocks
-            // self.unavailable_blocks.push(new_block);
-            unreachable!("overflow block should not be used up");
-        } else {
-            // new_block未被用完，将它加入recyclable blocks
-            // unsafe {
-            //     debug_assert!((*new_block).find_first_hole().is_some());
-            // }
-            self.recyclable_blocks.push_back(new_block);
-            unsafe {
-                self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();
+        let re= unsafe { 
+            match (*new_block).alloc(size) {
+                crate::AllocResult::Success(p) => p,
+                _ => unreachable!(),
             }
+        };
+        unsafe {
+            (*new_block).correct_overflow_avai_lines();
+        }
+        self.recyclable_blocks.push_back(new_block);
+        unsafe {
+            self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();
         }
         re
     }
@@ -391,16 +377,6 @@ impl ThreadLocalAllocator {
         unsafe { (*self.global_allocator).in_big_heap(ptr) }
     }
 
-    pub fn mv_exausted_blocks(&mut self) {
-        unsafe {
-            if !self.recyclable_blocks.is_empty()
-                && (**self.recyclable_blocks.front().unwrap_unchecked()).is_exaushted()
-            {
-                self.unavailable_blocks
-                    .push(self.recyclable_blocks.pop_front().unwrap_unchecked());
-            }
-        }
-    }
 
     /// # sweep
     ///

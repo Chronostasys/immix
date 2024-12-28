@@ -46,10 +46,7 @@ pub trait HeaderExt {
 }
 
 pub trait LineHeaderExt {
-    fn get_is_head(&self) -> bool;
-    fn set_is_head(&mut self, is_head: bool);
-    fn get_is_used_follow(&self) -> bool;
-    fn get_obj_line_size(&self, idx: usize, block: &mut Block) -> usize;
+    fn is_medium_body(&mut self) -> bool;
     fn set_forwarded(&mut self);
     fn get_forwarded(&self) -> bool;
     fn get_forward_start(&self) -> (bool, LineHeader);
@@ -145,6 +142,9 @@ impl LineHeaderExt for LineHeader {
     fn set_medium(&mut self) {
         *self |= 0b10000000;
     }
+    fn is_medium_body(&mut self) -> bool {
+        *self & 0b10000000 == 0b10000000
+    }
     #[inline]
     fn get_forward_start(&self) -> (bool, LineHeader) {
         let atom_self = self as *const u8 as *const AtomicU8;
@@ -166,36 +166,8 @@ impl LineHeaderExt for LineHeader {
         }
     }
 
-    fn get_obj_line_size(&self, idx: usize, block: &mut Block) -> usize {
-        // 自己必须是head
-        debug_assert!(*self & 0b10000000 != 0);
-        // 自己必须是used
-        debug_assert!(*self & 0b1 != 0);
-        // 往后遍历获取自身大小
-        let mut line_size = 1;
-        while idx + line_size < NUM_LINES_PER_BLOCK
-            && block.line_map[idx + line_size] & 0b10000001 == 0b00000001
-        {
-            line_size += 1;
-        }
-        line_size
-    }
 
-    fn get_is_head(&self) -> bool {
-        self & 0b10000000 == 0b10000000
-    }
 
-    fn set_is_head(&mut self, is_head: bool) {
-        if is_head {
-            *self |= 0b10000000;
-        } else {
-            *self &= !0b10000000;
-        }
-    }
-    #[inline]
-    fn get_is_used_follow(&self) -> bool {
-        self & 0b10000001 == 0b00000001
-    }
 
     fn is_pinned(&self) -> bool {
         self & 0b1100000 == 0b0100000
@@ -208,9 +180,6 @@ impl LineHeaderExt for LineHeader {
 }
 
 impl Block {
-    pub fn is_exaushted(&self) -> bool {
-        self.available_line_num == 0
-    }
     /// Create a new block.
     ///
     /// at must be a `BLOCK_SIZE` aligned pointer.
@@ -244,6 +213,18 @@ impl Block {
         println!("hole_num: {}", self.hole_num);
         println!("available_line_num: {}", self.available_line_num);
         println!("line_map: {:?}", self.line_map);
+    }
+
+
+    pub fn get_obj_line_size(&mut  self, idx: usize) -> usize {
+        // 往后遍历获取自身大小
+        let mut line_size = 1;
+        while idx + line_size < NUM_LINES_PER_BLOCK
+            && self.line_map[idx + line_size].is_medium_body()
+        {
+            line_size += 1;
+        }
+        line_size
     }
 
     /// return the used size of the block
@@ -435,21 +416,17 @@ impl Block {
     /// passing the pointer to the field b.
     pub unsafe fn get_head_ptr(&mut self, ptr: *mut u8) -> *mut u8 {
         let mut idx = self.get_line_idx_from_addr(ptr);
-        if idx < 3 {
-            log::warn!("invalid pointer: {:p}", ptr);
-            return std::ptr::null_mut();
-        }
+        debug_assert!(idx >= 3);
         let mut header = self.get_nth_line_header(idx);
         // 如果是head，直接返回
-        if header.get_is_head() {
-            return self.get_nth_line(idx);
+        if !header.is_medium_body() {
+            return ptr;
         }
+        idx -= 1;
+        header = self.get_nth_line_header(idx);
         // 否则往前找到head
-        while !header.get_is_head() {
-            if idx < 3 {
-                log::warn!("invalid pointer: {:p}", ptr);
-                return std::ptr::null_mut();
-            }
+        while header.is_medium_body() {
+            debug_assert!(idx >= 3);
             header = self.get_nth_line_header(idx - 1);
             idx -= 1;
         }
@@ -534,6 +511,10 @@ impl Block {
     }
 
 
+    pub unsafe fn correct_overflow_avai_lines(&mut self) {
+        self.available_line_num = NUM_LINES_PER_BLOCK- self.get_line_idx_from_addr(self.cursor);
+    }
+
 
     pub fn count_holes_and_avai_lines(&mut self) {
         // count from cursor to the end
@@ -597,99 +578,11 @@ impl Block {
         AllocResult::Success(ptr)
     }
 
-    /// # alloc
-    ///
-    /// start from the cursor, use get_next_hole to find a hole of the given size. Return
-    /// the start line index and whether this block can allocate more objects.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the size is valid.
-    #[inline(always)]
-    pub unsafe fn alloc_old(&mut self, size: usize, _obj_type: ObjectType) -> Option<(usize, bool)> {
-
-        todo!()
-        // debug_assert!(self.available_line_num <= NUM_LINES_PER_BLOCK - 3);
-        // let cursor = self.cursor;
-        // let line_size = (size - 1) / LINE_SIZE + 1;
-
-        // if self.next_hole_size >= line_size {
-        //     // fast path
-        //     self.available_line_num -= line_size;
-        //     let start = self.cursor;
-        //     // 设置起始line header的obj_type
-        //     let header = self.line_map.get_unchecked_mut(start);
-        //     *header |= (obj_type as u8) << 2 | 0b10000001;
-        //     for i in (self.cursor + 1)..=self.cursor - 1 + line_size {
-        //         let header = self.line_map.get_unchecked_mut(i);
-        //         header.set_used(true);
-        //     }
-        //     self.cursor += line_size;
-        //     self.next_hole_size -= line_size;
-        //     if self.next_hole_size == 0 {
-        //         debug_assert!(
-        //             self.cursor >= NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1
-        //         );
-        //         self.hole_num -= 1;
-        //         debug_assert!(self.hole_num == count_holes(&self.line_map));
-        //     }
-        //     return Some((start, self.available_line_num > 0));
-        // }
-        // if line_size + self.cursor > NUM_LINES_PER_BLOCK {
-        //     return None;
-        // }
-        // let hole = self.find_next_hole((cursor, 0), line_size);
-        // // debug_assert!(hole.is_some(), "cursor {}, header {:?}, hole: {} av {} first idx {} first_len {}", cursor,self.line_map,self.hole_num,self.available_line_num, self.first_hole_line_idx,self.first_hole_line_len);
-        // if let Some((start, len)) = hole {
-        //     self.available_line_num -= line_size;
-        //     // 设置起始line header的obj_type
-        //     let header = self.line_map.get_unchecked_mut(start);
-        //     *header |= (obj_type as u8) << 2 | 0b10000001;
-        //     // 标记为已使用
-        //     for i in (start + 1)..=start - 1 + line_size {
-        //         let header = self.line_map.get_unchecked_mut(i);
-        //         header.set_used(true);
-        //     }
-
-        //     // 更新first_hole_line_idx和first_hole_line_len
-        //     self.cursor = start + line_size;
-        //     self.next_hole_size = len - line_size;
-        //     if self.next_hole_size == 0 {
-        //         debug_assert!(
-        //             self.cursor >= NUM_LINES_PER_BLOCK || self.line_map[self.cursor] & 1 == 1
-        //         );
-        //         self.hole_num -= 1;
-        //         debug_assert!(self.hole_num == count_holes(&self.line_map));
-        //     }
-
-        //     return Some((start, self.available_line_num > 0));
-        // }
-        // None
-    }
-    pub fn count_holes(&self) -> usize {
-        count_holes(&self.line_map)
-    }
-}
-
-pub fn count_holes(header: &[u8; 256]) -> usize {
-    let mut holes = 0;
-    let mut idx = 3;
-    while idx < NUM_LINES_PER_BLOCK {
-        if header[idx] & 1 == 0 {
-            holes += 1;
-            while idx < NUM_LINES_PER_BLOCK && header[idx] & 1 == 0 {
-                idx += 1;
-            }
-        } else {
-            idx += 1;
-        }
-    }
-    holes
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{allocator::GlobalAllocator, HeaderExt, BLOCK_SIZE, NUM_LINES_PER_BLOCK};
+    use crate::{allocator::GlobalAllocator, BLOCK_SIZE, NUM_LINES_PER_BLOCK};
 
     #[test]
     fn test_block_alloc() {
@@ -738,6 +631,24 @@ mod tests {
             let cursor = block.cursor;
             assert_eq!(cursor, block.get_nth_line(3));
             assert_eq!(gram.get(&3), Some(&3));
+        };
+    }
+
+    #[test]
+    fn test_get_head_ptr() {
+        unsafe {
+            let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
+            let block = &mut *ga.get_block();
+            block.cursor = block.cursor.add(64);
+            let l = block.get_nth_line_header(100);
+            *l = 0b10;
+            let l = block.get_nth_line_header(101);
+            *l = 0b10000000;
+            let l = block.get_nth_line_header(103);
+            *l = 0b10;
+            let ptr = block.get_nth_line(101).add(8);
+            let head = block.get_head_ptr(ptr);
+            assert_eq!(head, block.get_nth_line(100));
         };
     }
 

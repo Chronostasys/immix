@@ -7,8 +7,7 @@ const SAFE_POINT_ID: u64 = 2882400000;
 #[no_mangle]
 pub fn print_stack_map(mapptr: *const u8) {
     let mut map = FxHashMap::default();
-    let mut global_roots = vec![];
-    build_root_maps(mapptr, &mut map, &mut global_roots);
+    build_root_maps(mapptr, &mut map);
     for (addr, func) in map.iter() {
         println!("addr: {:p}", *addr);
         println!("roots: {:?}", func.roots);
@@ -141,7 +140,7 @@ struct LiveOuts {
 pub fn build_root_maps(
     mapptr: *const u8,
     roots: &mut FxHashMap<*const u8, Function>,
-    _global_roots: &mut Vec<(*mut u8, u8)>,
+    // _global_roots: &mut Vec<(*mut u8, u8)>,
 ) {
     let header_ptr = mapptr as *const Header;
     let header = unsafe { *header_ptr };
@@ -245,7 +244,7 @@ pub fn build_root_maps(
         }
     }
 
-    build_root_maps(start_ptr as _, roots, _global_roots);
+    build_root_maps(start_ptr as _, roots);
 }
 
 fn build_global_roots(ptr: *const u8, global_roots: &mut Vec<*const u8>) {
