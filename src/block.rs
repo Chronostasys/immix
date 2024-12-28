@@ -256,6 +256,11 @@ impl Block {
         self.available_line_num = NUM_LINES_PER_BLOCK - 3;
         self.eva_target = false;
         self.hole_end = unsafe{ptr.add(BLOCK_SIZE)};
+        self.end = unsafe {(ptr as *mut u8).offset(BLOCK_SIZE as _)};
+    }
+
+    pub fn get_cursor(&self) -> *mut u8 {
+        self.cursor
     }
 
     /// # correct_header
@@ -292,6 +297,7 @@ impl Block {
                 idx += 1;
                 while idx < NUM_LINES_PER_BLOCK && self.line_map[idx] & 0b10000000 == 0b10000000 {
                     // set used bit
+                    self.line_map[idx] &= !0b10;
                     self.line_map[idx] |= 0b1;
                     used_lines += 1;
                     idx += 1;
@@ -304,6 +310,7 @@ impl Block {
                     hole_num += 1;
                     hole_flag = true;
                 }
+                self.line_map[idx] &= 0;
                 idx += 1;
             }
             
@@ -420,7 +427,7 @@ impl Block {
         let mut header = self.get_nth_line_header(idx);
         // 如果是head，直接返回
         if !header.is_medium_body() {
-            return ptr;
+            return self.get_nth_line(idx);
         }
         idx -= 1;
         header = self.get_nth_line_header(idx);
@@ -482,12 +489,6 @@ impl Block {
 
 
     pub unsafe fn bump_next_hole(&mut self) ->Option<()> {
-        if self.hole_num <= 1 {
-            self.cursor = self.hole_end;
-            self.hole_num = 0;
-            return None;
-        }
-        self.hole_num -= 1;
         // update cursor, hole_end to the next hole, if there is no hole, set cursor to the end
         // decrease hole_num
         let next_idx = self.get_line_idx_from_addr(self.hole_end);
@@ -507,7 +508,7 @@ impl Block {
                 return Some(());
             }
         }
-        unreachable!()
+        return None;
     }
 
 
@@ -551,7 +552,7 @@ impl Block {
             let current_line_remains = self.cursor.align_offset(LINE_SIZE);
             if current_line_remains < size {
                 // if exceeds, move cursor to next line
-                self.cursor = self.cursor.add(LINE_SIZE - current_line_remains);
+                self.cursor = self.cursor.add(current_line_remains);
                 if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
                     return AllocResult::Exauted;
                 }

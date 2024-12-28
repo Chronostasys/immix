@@ -193,8 +193,8 @@ pub unsafe extern "C" fn DioGC__stuck_end() {
     DioGC::stuck_end()
 }
 #[no_mangle]
-pub unsafe extern "C" fn DioGC__collect() {
-    DioGC::collect()
+pub unsafe extern "C" fn DioGC__collect(sp: *mut u8) {
+    crate::gc_collect_fast_unwind(sp);
 }
 #[no_mangle]
 pub unsafe extern "C" fn DioGC__get_stw_num() -> i64 {

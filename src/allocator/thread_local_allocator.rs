@@ -165,7 +165,6 @@ impl ThreadLocalAllocator {
     pub fn set_eva_threshold(&mut self, _threshold: usize) {
         self.recyclable_blocks
             .iter()
-            .chain(self.unavailable_blocks.iter())
             .for_each(|block| unsafe {
                 (**block).set_eva_threshold({
                     #[cfg(not(debug_assertions))]
