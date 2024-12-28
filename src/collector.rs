@@ -247,12 +247,6 @@ impl Collector {
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
         // let start = Instant::now();
-        unsafe {
-            self.thread_local_allocator
-                .as_mut()
-                .unwrap_unchecked()
-                .mv_exausted_blocks();
-        }
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
@@ -471,8 +465,8 @@ impl Collector {
                     if idx == NUM_LINES_PER_BLOCK {
                         break;
                     }
-                    let (line_header, _) = block.get_line_header_from_addr(ptr);
-                    if line_header.get_is_head() {
+                    let line_header = block.get_nth_line_header(idx);
+                    if !line_header.is_medium_body() {
                         break;
                     }
                 }
@@ -551,16 +545,15 @@ impl Collector {
                     spin_until!(line_header.get_forwarded());
 
                     let _ = self.correct_ptr(father, offset_from_head, ptr);
-                    debug_assert!(line_header.get_used());
                     return;
                 }
 
                 // otherwise, we shall forward it
                 let atomic_ptr = head as *mut AtomicPtr<u8>;
 
-                let obj_line_size = line_header.get_obj_line_size(idx, Block::from_obj_ptr(head));
+                let obj_line_size =(*block_p).get_obj_line_size(idx);
                 let new_ptr =
-                    self.alloc_no_collect(obj_line_size * LINE_SIZE, line_header.get_obj_type());
+                    self.alloc_no_collect(obj_line_size * LINE_SIZE, ObjectType::Conservative);
                 if !new_ptr.is_null() {
                     let new_block = Block::from_obj_ptr(new_ptr);
                     // eprintln!("eva to block addr: {:p}", new_block);
@@ -591,14 +584,8 @@ impl Collector {
             }
 
             line_header.set_marked(true);
-            let obj_type = line_header.get_obj_type();
-            match obj_type {
-                ObjectType::Atomic => {}
-                // ObjectType::Trait => self.mark_trait(head),
-                // ObjectType::Complex => self.mark_complex(head),
-                // ObjectType::Pointer => self.mark_ptr(head),
-                _ => self.push_job(head, obj_type),
-            }
+            // let obj_type = line_header.get_obj_type();
+            self.push_job(head, ObjectType::Conservative)
         }
         // mark it if it is a big object
         else if self
@@ -709,19 +696,13 @@ impl Collector {
         self.mark_fast_unwind(std::ptr::null_mut());
     }
 
-    fn mark_stack_offset(&self, sp: *mut u8, offset: i32, obj_type: ObjectType) {
+    fn mark_stack_offset(&self, sp: *mut u8, offset: i32) {
         unsafe {
             let root = sp.offset(offset as isize);
             if root.is_null() {
                 return;
             }
-            match obj_type {
-                ObjectType::Atomic => panic!("stack root shall never be atomic"),
-                ObjectType::Trait => self.mark_trait(*(root as *mut *mut u8)),
-                ObjectType::Complex => self.mark_complex(*(root as *mut *mut u8)),
-                ObjectType::Pointer => self.mark_ptr(root),
-                ObjectType::Conservative => self.mark_conservative(*(root as *mut *mut u8)),
-            }
+            self.mark_ptr(root);
         }
     }
 
@@ -1032,7 +1013,7 @@ impl Collector {
         let frame_size = f.frame_size + 8;
         #[cfg(feature = "conservative_stack_scan")]
         for i in 0..=frame_size / 8 {
-            self.mark_stack_offset(*sp as _, i * 8, ObjectType::Pointer);
+            self.mark_stack_offset(*sp as _, i * 8);
         }
     }
 
@@ -1050,7 +1031,7 @@ impl Collector {
                     .as_mut()
                     .unwrap()
                     .iter()
-                    .for_each(|(root, tp)| {
+                    .for_each(|(root, size)| {
                         log::debug!(
                             "gc {}: mark global {:p} {:p} {:p}",
                             self.id,
@@ -1069,21 +1050,10 @@ impl Collector {
                                 }
                             }
                         );
-
-                        match IntEnum::from_int(*tp).unwrap() {
-                            ObjectType::Atomic => {}
-                            ObjectType::Complex => {
-                                self.mark_complex(*root);
-                            }
-                            ObjectType::Trait => {
-                                self.mark_trait(*root);
-                            }
-                            ObjectType::Pointer => {
-                                self.mark_ptr(*root);
-                            }
-                            ObjectType::Conservative => self.mark_conservative(*root),
+                        for i in 0..=(*size)/8 {
+                            self.mark_stack_offset(*root, i);
                         }
-                        // self.mark_ptr(*root);
+
                     });
             }
         }
@@ -1216,6 +1186,7 @@ impl Collector {
             if ENABLE_EVA.load(Ordering::SeqCst)
                 && self.thread_local_allocator.as_mut().unwrap().should_eva()
             {
+                
                 // 如果需要驱逐，首先计算驱逐阀域
                 let mut eva_threshold = 0;
                 let mut available_histogram: FxHashMap<usize, usize> =

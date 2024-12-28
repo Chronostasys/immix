@@ -61,16 +61,16 @@ lazy_static! {
     };
 }
 
-pub fn register_global(p: *mut u8, tp: u8) {
+pub fn register_global(p: *mut u8, size: i32) {
     unsafe {
-        STACK_MAP.global_roots.as_mut().unwrap().push((p, tp));
+        STACK_MAP.global_roots.as_mut().unwrap().push((p, size));
     }
 }
 
 #[cfg(feature = "llvm_stackmap")]
 pub struct StackMapWrapper {
     pub map: *mut FxHashMap<*const u8, Function>,
-    pub global_roots: *mut Vec<(*mut u8, u8)>,
+    pub global_roots: *mut Vec<(*mut u8, i32)>,
 }
 #[cfg(feature = "llvm_stackmap")]
 unsafe impl Sync for StackMapWrapper {}
@@ -349,9 +349,7 @@ pub fn safepoint_fast_unwind_ex(sp: *mut u8, gc: *mut Collector) {
 pub fn gc_init(ptr: *mut u8) {
     // print_stack_map(ptr);
     // println!("stackmap: {:?}", &STACK_MAP.map.borrow());
-    build_root_maps(ptr, unsafe { STACK_MAP.map.as_mut().unwrap() }, unsafe {
-        STACK_MAP.global_roots.as_mut().unwrap()
-    });
+    build_root_maps(ptr, unsafe { STACK_MAP.map.as_mut().unwrap() });
     #[cfg(feature = "gc_profile")]
     eprintln!("init done {:?}", &GC_INIT_TIME.elapsed().as_nanos());
     log::info!("read stack map done");
