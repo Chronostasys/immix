@@ -257,7 +257,7 @@ impl ThreadLocalAllocator {
             }
         }
         debug_assert!(!unsafe { f.as_ref().unwrap() }.is_eva_candidate());
-        let res = unsafe { (**f).alloc(size, obj_type) };
+        let res = unsafe { (**f).alloc_old(size, obj_type) };
         // return std::ptr::null_mut();
         if res.is_none() {
             // if size <= LINE_SIZE {
@@ -309,7 +309,7 @@ impl ThreadLocalAllocator {
         }
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
-        let (s, nxt) = unsafe { (*new_block).alloc(size, obj_type).unwrap() };
+        let (s, nxt) = unsafe { (*new_block).alloc_old(size, obj_type).unwrap() };
         let re = unsafe { (*new_block).get_nth_line(s) };
         if !nxt {
             // // new_block被用完，将它加入unavailable blocks

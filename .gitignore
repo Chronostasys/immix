@@ -56,3 +56,4 @@ planglib/thirdparty
 llvm/cmake-build-debug/build.ninja
 testout*
 Cargo.lock
+.vscode/settings.json
