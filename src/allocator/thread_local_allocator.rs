@@ -76,11 +76,13 @@ impl ThreadLocalAllocator {
     ///
     /// * `global_allocator` - global allocator
     pub fn new(global_allocator: *mut GlobalAllocator) -> Self {
+        let recycle_blocks = VecDeque::new();
+        // recycle_blocks.push_back(initial_block);
         Self {
-            curr_block: unsafe { global_allocator.as_mut().unwrap().get_block() },
+            curr_block: std::ptr::null_mut(),
             global_allocator,
             unavailable_blocks: Vec::new(),
-            recyclable_blocks: VecDeque::new(),
+            recyclable_blocks: recycle_blocks,
             eva_blocks: Vec::new(),
             collect_mode: false,
             blocks_to_return: Vec::new(),
@@ -147,7 +149,9 @@ impl ThreadLocalAllocator {
 
     pub fn fill_available_histogram(&self, histogram: &mut FxHashMap<usize, usize>) -> usize {
         if let Some(b) = self.recyclable_blocks.front() {
-            unsafe { (**b).count_holes_and_avai_lines(); }
+            unsafe {
+                (**b).count_holes_and_avai_lines();
+            }
         }
         let mut total_available = 0;
         self.recyclable_blocks.iter().for_each(|block| unsafe {
@@ -163,20 +167,18 @@ impl ThreadLocalAllocator {
     }
 
     pub fn set_eva_threshold(&mut self, _threshold: usize) {
-        self.recyclable_blocks
-            .iter()
-            .for_each(|block| unsafe {
-                (**block).set_eva_threshold({
-                    #[cfg(not(debug_assertions))]
-                    {
-                        _threshold
-                    }
-                    #[cfg(debug_assertions)]
-                    {
-                        0
-                    }
-                })
-            });
+        self.recyclable_blocks.iter().for_each(|block| unsafe {
+            (**block).set_eva_threshold({
+                #[cfg(not(debug_assertions))]
+                {
+                    _threshold
+                }
+                #[cfg(debug_assertions)]
+                {
+                    0
+                }
+            })
+        });
     }
 
     /// # get_size
@@ -246,7 +248,7 @@ impl ThreadLocalAllocator {
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
         unsafe {
-            while (**f).is_eva_candidate() && self.collect_mode  {
+            while (**f).is_eva_candidate() && self.collect_mode {
                 let uf = self.recyclable_blocks.pop_front().unwrap_unchecked();
                 self.unavailable_blocks.push(uf);
                 let ff = self.recyclable_blocks.front();
@@ -262,18 +264,21 @@ impl ThreadLocalAllocator {
 
         match res {
             crate::AllocResult::Success(p) => {
+                self.curr_block = *f;
                 p
-            },
+            }
             crate::AllocResult::Fail => {
                 debug_assert!(size > LINE_SIZE);
                 // mid size object alloc failed, try to overflow_alloc
-                return self.overflow_alloc(size);
-            },
-            crate::AllocResult::Exauted => {
-                unsafe{self.unavailable_blocks.push(self.recyclable_blocks.pop_front().unwrap_unchecked());}
-                return self.normal_alloc(size);
-
-            },
+                self.overflow_alloc(size)
+            }
+            crate::AllocResult::Exhausted => {
+                unsafe {
+                    self.unavailable_blocks
+                        .push(self.recyclable_blocks.pop_front().unwrap_unchecked());
+                }
+                self.normal_alloc(size)
+            }
         }
     }
 
@@ -297,7 +302,7 @@ impl ThreadLocalAllocator {
         }
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
-        let re= unsafe { 
+        let re = unsafe {
             match (*new_block).alloc(size) {
                 crate::AllocResult::Success(p) => p,
                 _ => unreachable!(),
@@ -307,9 +312,9 @@ impl ThreadLocalAllocator {
             (*new_block).correct_overflow_avai_lines();
         }
         self.recyclable_blocks.push_back(new_block);
-        unsafe {
-            self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();
-        }
+        // unsafe {
+        //     self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();
+        // }
         re
     }
     /// # big_obj_alloc
@@ -375,7 +380,6 @@ impl ThreadLocalAllocator {
     pub fn in_big_heap(&self, ptr: *mut u8) -> bool {
         unsafe { (*self.global_allocator).in_big_heap(ptr) }
     }
-
 
     /// # sweep
     ///
@@ -461,7 +465,10 @@ impl ThreadLocalAllocator {
 
         let curr = self.recyclable_blocks.front().cloned();
         if curr.is_none() {
-            self.curr_block = self.blocks_to_return.pop().unwrap_or(self.get_new_block());
+            self.curr_block = self
+                .blocks_to_return
+                .pop()
+                .unwrap_or_else(|| self.get_new_block());
             if self.curr_block.is_null() {
                 panic!("OOM! GC does not free enough memory!");
             }

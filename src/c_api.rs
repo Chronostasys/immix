@@ -13,7 +13,7 @@ pub unsafe extern "C" fn immix_gc_init(ptr: *mut u8) {
 
 struct DioGC();
 impl DioGC {
-    pub unsafe fn register_global(p: *mut u8, size:i32) {
+    pub unsafe fn register_global(p: *mut u8, size: i32) {
         crate::register_global(p, size);
     }
     pub unsafe fn malloc(size: u64, obj_type: u8, rsp: *mut *mut u8) -> *mut u8 {
