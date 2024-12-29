@@ -277,12 +277,12 @@ impl Collector {
             return;
         }
         let mut status = self.status.borrow_mut();
-        if  (unsafe {
-                self.thread_local_allocator
-                    .as_mut()
-                    .unwrap_unchecked()
-                    .should_gc()
-            } && !GC_SWEEPING.load(Ordering::Acquire))
+        if (unsafe {
+            self.thread_local_allocator
+                .as_mut()
+                .unwrap_unchecked()
+                .should_gc()
+        } && !GC_SWEEPING.load(Ordering::Acquire))
         {
             log::info!("gc {}: GC is needed, start gc", self.id);
             status.am_i_triggered = true;
@@ -494,7 +494,9 @@ impl Collector {
                     let mut start = (_big_obj as *mut u8).add(16);
                     let end = start.add((*_big_obj).size - 16);
                     while start < end {
-                        self.mark_ptr(start);
+                        self.queue
+                            .push(SendableMarkJob::Object((start, ObjectType::Pointer)));
+                        // self.mark_ptr(start);
                         start = start.add(8);
                     }
                 }
@@ -556,7 +558,7 @@ impl Collector {
                 // otherwise, we shall forward it
                 let atomic_ptr = head as *mut AtomicPtr<u8>;
 
-                let obj_line_size =(*block_p).get_obj_line_size(idx);
+                let obj_line_size = (*block_p).get_obj_line_size(idx);
                 let new_ptr =
                     self.alloc_no_collect(obj_line_size * LINE_SIZE, ObjectType::Conservative);
                 if !new_ptr.is_null() {
@@ -612,7 +614,7 @@ impl Collector {
                 let obj_type = (*big_obj).header.get_obj_type();
                 match obj_type {
                     ObjectType::Atomic => {}
-                    _ => self.push_job(ptr, obj_type),
+                    _ => self.push_job(ptr, ObjectType::Conservative),
                 }
             }
         }
@@ -707,7 +709,9 @@ impl Collector {
             if root.is_null() {
                 return;
             }
-            self.mark_ptr(root);
+            self.queue
+                .push(SendableMarkJob::Object((root, ObjectType::Pointer)));
+            // self.mark_ptr(root);
         }
     }
 
@@ -1017,14 +1021,13 @@ impl Collector {
         #[cfg(target_arch = "x86_64")]
         let frame_size = f.frame_size + 8;
         #[cfg(feature = "conservative_stack_scan")]
-        for i in 0..(frame_size+7) / 8 {
+        for i in 0..(frame_size + 7) / 8 {
             self.mark_stack_offset(*sp as _, i * 8);
         }
     }
 
     #[cfg(feature = "llvm_stackmap")]
     fn mark_globals(&self) {
-
         if GLOBAL_MARK_FLAG
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -1036,8 +1039,8 @@ impl Collector {
                     .unwrap()
                     .iter()
                     .for_each(|(root, size)| {
-                        for i in 0..(*size+7)/8 {
-                            self.mark_stack_offset(*root, i*8);
+                        for i in 0..(*size + 7) / 8 {
+                            self.mark_stack_offset(*root, i * 8);
                         }
                     });
             }
@@ -1081,7 +1084,7 @@ impl Collector {
         let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         if v - 1 == 0 {
             log::info!("gc {}: sweep done", self.id);
-            // println!("gc sweep end {}", self.id);
+            // eprintln!("gc sweep end {}", self.id);
             GC_SWEEPING.store(false, Ordering::Release);
         }
         #[cfg(feature = "gc_profile")]
@@ -1171,7 +1174,6 @@ impl Collector {
             if ENABLE_EVA.load(Ordering::SeqCst)
                 && self.thread_local_allocator.as_mut().unwrap().should_eva()
             {
-                
                 // 如果需要驱逐，首先计算驱逐阀域
                 let mut eva_threshold = 0;
                 let mut available_histogram: FxHashMap<usize, usize> =

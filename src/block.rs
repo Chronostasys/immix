@@ -31,7 +31,7 @@ pub enum ObjectType {
 pub enum AllocResult {
     Success(*mut u8),
     Fail,
-    Exauted
+    Exhausted,
 }
 
 type LineHeader = u8;
@@ -77,12 +77,12 @@ fn count_next_zeros(line_map: &[u8; 256], idx: usize) -> usize {
 #[repr(C)]
 pub struct Block {
     /// 第一个hole的起始地址
-    cursor: * mut u8,
-    hole_end: * mut u8,
+    cursor: *mut u8,
+    hole_end: *mut u8,
+    end: *mut u8,
     available_line_num: usize,
     /// 洞的数量
     hole_num: usize,
-    end: * mut u8,
     /// |                           LINE HEADER(1 byte)                         |
     /// |    7   |    6   |    5   |    4   |    3   |    2   |    1   |    0   |
     /// | medium |   eva  |  evaed |        -----------       | marked |  used  |
@@ -166,9 +166,6 @@ impl LineHeaderExt for LineHeader {
         }
     }
 
-
-
-
     fn is_pinned(&self) -> bool {
         self & 0b1100000 == 0b0100000
     }
@@ -189,9 +186,9 @@ impl Block {
             debug_assert!(ptr as usize % BLOCK_SIZE == 0);
             ptr.write(Self {
                 line_map: [0; NUM_LINES_PER_BLOCK],
-                cursor: (ptr as *mut u8).offset((LINE_SIZE*3) as _), // 跳过前三行，都用来放metadata。浪费一点空间（metadata从0.8%->1.2%）
-                hole_end: (ptr as *mut u8).offset(BLOCK_SIZE as _),
-                end: (ptr as *mut u8).offset(BLOCK_SIZE as _),
+                cursor: (ptr as *mut u8).add(LINE_SIZE * 3), // 跳过前三行，都用来放metadata。浪费一点空间（metadata从0.8%->1.2%）
+                hole_end: (ptr as *mut u8).add(BLOCK_SIZE),
+                end: (ptr as *mut u8).add(BLOCK_SIZE),
                 marked: false,
                 hole_num: 1,
                 available_line_num: NUM_LINES_PER_BLOCK - 3,
@@ -215,8 +212,7 @@ impl Block {
         println!("line_map: {:?}", self.line_map);
     }
 
-
-    pub fn get_obj_line_size(&mut  self, idx: usize) -> usize {
+    pub fn get_obj_line_size(&mut self, idx: usize) -> usize {
         // 往后遍历获取自身大小
         let mut line_size = 1;
         while idx + line_size < NUM_LINES_PER_BLOCK
@@ -249,14 +245,14 @@ impl Block {
     }
     pub fn reset_header(&mut self) {
         let ptr = self as *mut Self as *mut u8;
-        self.cursor = unsafe{ptr.add(LINE_SIZE * 3)};
+        self.cursor = unsafe { ptr.add(LINE_SIZE * 3) };
         self.line_map = [0; NUM_LINES_PER_BLOCK];
         self.marked = false;
         self.hole_num = 1;
         self.available_line_num = NUM_LINES_PER_BLOCK - 3;
         self.eva_target = false;
-        self.hole_end = unsafe{ptr.add(BLOCK_SIZE)};
-        self.end = unsafe {(ptr as *mut u8).offset(BLOCK_SIZE as _)};
+        self.hole_end = unsafe { ptr.add(BLOCK_SIZE) };
+        self.end = unsafe { ptr.add(BLOCK_SIZE) };
     }
 
     pub fn get_cursor(&self) -> *mut u8 {
@@ -313,7 +309,6 @@ impl Block {
                 self.line_map[idx] &= 0;
                 idx += 1;
             }
-            
         }
 
         if let Some(cursor) = cursor {
@@ -484,11 +479,7 @@ impl Block {
         self.eva_target
     }
 
-
-
-
-
-    pub unsafe fn bump_next_hole(&mut self) ->Option<()> {
+    pub unsafe fn bump_next_hole(&mut self) -> Option<()> {
         // update cursor, hole_end to the next hole, if there is no hole, set cursor to the end
         // decrease hole_num
         let next_idx = self.get_line_idx_from_addr(self.hole_end);
@@ -508,23 +499,21 @@ impl Block {
                 return Some(());
             }
         }
-        return None;
+        Option::<()>::None
     }
-
 
     pub unsafe fn correct_overflow_avai_lines(&mut self) {
-        self.available_line_num = NUM_LINES_PER_BLOCK- self.get_line_idx_from_addr(self.cursor);
+        self.available_line_num = NUM_LINES_PER_BLOCK - self.get_line_idx_from_addr(self.cursor);
     }
-
 
     pub fn count_holes_and_avai_lines(&mut self) {
         // count from cursor to the end
-        let alined_cursor = unsafe{self.cursor.add(self.cursor.align_offset(LINE_SIZE))};
-        let idx = unsafe{self.get_line_idx_from_addr(alined_cursor)};
+        let alined_cursor = unsafe { self.cursor.add(self.cursor.align_offset(LINE_SIZE)) };
+        let idx = unsafe { self.get_line_idx_from_addr(alined_cursor) };
         let mut holes = 0;
         let mut avai = 0;
         let mut i = idx;
-        while  i < NUM_LINES_PER_BLOCK {
+        while i < NUM_LINES_PER_BLOCK {
             let header = self.line_map[i];
             if !header.get_used() {
                 holes += 1;
@@ -542,6 +531,9 @@ impl Block {
     }
 
     pub unsafe fn alloc(&mut self, size: usize) -> AllocResult {
+        if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
+            return AllocResult::Exhausted;
+        }
         // doing a bump allocation
         // real alloc size must be a multiple of 8 bytes
         let size = (size + 7) / 8 * 8;
@@ -550,11 +542,11 @@ impl Block {
         if is_small {
             // if small, check if it exceeds current line
             let current_line_remains = self.cursor.align_offset(LINE_SIZE);
-            if current_line_remains < size {
+            if current_line_remains < size && current_line_remains != 0 {
                 // if exceeds, move cursor to next line
                 self.cursor = self.cursor.add(current_line_remains);
                 if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
-                    return AllocResult::Exauted;
+                    return AllocResult::Exhausted;
                 }
             }
             // bump allocation
@@ -578,7 +570,6 @@ impl Block {
         self.cursor = cursor.add(size);
         AllocResult::Success(ptr)
     }
-
 }
 
 #[cfg(test)]
@@ -590,7 +581,7 @@ mod tests {
         unsafe {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
             let block = &mut *ga.get_block();
-            
+
             block.cursor = block.cursor.add(64);
             block.count_holes_and_avai_lines();
             assert_eq!(block.hole_num, 1);
@@ -652,5 +643,4 @@ mod tests {
             assert_eq!(head, block.get_nth_line(100));
         };
     }
-
 }
