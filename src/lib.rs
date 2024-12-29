@@ -532,5 +532,8 @@ pub unsafe fn set_shadow_stack_addr(addr: *mut u8) {
 pub fn exit_block() {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
     let mut v = GC_COLLECTOR_COUNT.lock();
+    if v.0 == 0 {
+        return;
+    }
     GC_MARK_COND.wait_while(&mut v, |(c, _, _)| *c == 0);
 }
