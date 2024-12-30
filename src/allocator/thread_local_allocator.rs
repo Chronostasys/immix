@@ -232,11 +232,11 @@ impl ThreadLocalAllocator {
             return self.big_obj_alloc(size, obj_type);
         }
 
-        self.normal_alloc(size)
+        self.normal_alloc(size, obj_type)
     }
 
     #[inline(always)]
-    fn normal_alloc(&mut self, size: usize) -> *mut u8 {
+    fn normal_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
         // mid size object & small size object
         // 刚启动或者recycle block全用光了
         if self.recyclable_blocks.is_empty() {
@@ -255,12 +255,12 @@ impl ThreadLocalAllocator {
                 if let Some(ff) = ff {
                     f = ff;
                 } else {
-                    return self.normal_alloc(size);
+                    return self.normal_alloc(size,obj_type);
                 }
             }
         }
         debug_assert!(!unsafe { f.as_ref().unwrap() }.is_eva_candidate());
-        let res = unsafe { (**f).alloc(size) };
+        let res = unsafe { (**f).alloc(size, obj_type) };
 
         match res {
             crate::AllocResult::Success(p) => {
@@ -273,14 +273,14 @@ impl ThreadLocalAllocator {
             crate::AllocResult::Fail => {
                 debug_assert!(size > LINE_SIZE);
                 // mid size object alloc failed, try to overflow_alloc
-                self.overflow_alloc(size)
+                self.overflow_alloc(size, obj_type)
             }
             crate::AllocResult::Exhausted => {
                 unsafe {
                     self.unavailable_blocks
                         .push(self.recyclable_blocks.pop_front().unwrap_unchecked());
                 }
-                self.normal_alloc(size)
+                self.normal_alloc(size, obj_type)
             }
         }
     }
@@ -296,7 +296,7 @@ impl ThreadLocalAllocator {
     /// ## Return
     ///
     /// * `*mut u8` - object pointer
-    pub fn overflow_alloc(&mut self, size: usize) -> *mut u8 {
+    pub fn overflow_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
         // eprintln!("overflow alloc");
         // 获取新block
         let new_block = self.get_new_block();
@@ -306,7 +306,7 @@ impl ThreadLocalAllocator {
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
         let re = unsafe {
-            match (*new_block).alloc(size) {
+            match (*new_block).alloc(size,obj_type) {
                 crate::AllocResult::Success(p) => p,
                 _ => unreachable!(),
             }

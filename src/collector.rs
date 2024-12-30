@@ -20,12 +20,7 @@ use crate::GC_INIT_TIME;
 #[cfg(feature = "llvm_stackmap")]
 use crate::STACK_MAP;
 use crate::{
-    allocator::{GlobalAllocator, ThreadLocalAllocator},
-    block::{Block, LineHeaderExt, ObjectType},
-    gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, SendableMarkJob, BLOCK_SIZE,
-    ENABLE_EVA, FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND,
-    GC_RUNNING, GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE,
-    NUM_LINES_PER_BLOCK, SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
+    allocator::{GlobalAllocator, ThreadLocalAllocator}, block::{Block, LineHeaderExt, ObjectType}, gc_is_auto_collect_enabled, immix_obj::ImmixObject, spin_until, Function, HeaderExt, SendableMarkJob, BLOCK_SIZE, ENABLE_EVA, FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING, GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK, SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK
 };
 
 pub static SLOW_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -447,35 +442,36 @@ impl Collector {
     fn mark_conservative(&self, ptr: *mut u8) {
         unsafe {
             if self.thread_local_allocator.as_mut().unwrap().in_heap(ptr) {
-                let block_p: *mut Block = Block::from_obj_ptr(ptr) as *mut _;
+                // let block_p: *mut Block = Block::from_obj_ptr(ptr) as *mut _;
 
-                let block = &mut *block_p;
-                block.marked = true;
-                let head = block.get_head_ptr(ptr);
-                if head.is_null() {
-                    return;
-                }
-                let (header, mut idx) = block.get_line_header_from_addr(head);
-                header.set_marked(true);
-                // walk from head to end
-                // let mut line_header = line_header;
-                loop {
-                    let ptr = block.get_nth_line(idx);
-                    for i in 0..LINE_SIZE / 8 {
-                        let p = ptr.add(i * 8);
-                        self.mark_ptr(p);
-                    }
+                // let block = &mut *block_p;
+                // block.marked = true;
+                // let head = block.get_head_ptr(ptr);
+                // if head.is_null() {
+                //     return;
+                // }
+                // let (header, mut idx) = block.get_line_header_from_addr(head);
+                // header.set_marked(true);
+                // // walk from head to end
+                // // let mut line_header = line_header;
+                // loop {
+                //     let ptr = block.get_nth_line(idx);
+                //     for i in 0..LINE_SIZE / 8 {
+                //         let p = ptr.add(i * 8);
+                //         self.mark_ptr(p);
+                //     }
 
-                    idx += 1;
-                    if idx == NUM_LINES_PER_BLOCK {
-                        break;
-                    }
-                    let line_header = block.get_nth_line_header(idx);
-                    if !line_header.is_medium_body() {
-                        break;
-                    }
-                    line_header.set_marked(true);
-                }
+                //     idx += 1;
+                //     if idx == NUM_LINES_PER_BLOCK {
+                //         break;
+                //     }
+                //     let line_header = block.get_nth_line_header(idx);
+                //     if !line_header.is_medium_body() {
+                //         break;
+                //     }
+                //     line_header.set_marked(true);
+                // }
+                unimplemented!("conservative marking is not implemented");
             } else if self
                 .thread_local_allocator
                 .as_mut()
@@ -531,76 +527,88 @@ impl Collector {
             let block = &mut *block_p;
             let cursor = block.get_cursor();
             let is_candidate = block.is_eva_candidate();
-            let mut head = block.get_head_ptr(ptr);
-            if head.is_null() {
-                return;
-            }
-            let offset_from_head = ptr.offset_from(head);
-            let (line_header, idx) = block.get_line_header_from_addr(head);
+            let obj = ImmixObject::from_unaligned_ptr(ptr);
+            let obj_ref = obj.as_mut().unwrap_unchecked();
+            let mut body = obj_ref.get_body();
+            let body_size = obj_ref.body_size();
+            let offset_from_head = ptr.offset_from(body);
+            let (line_header, _) = block.get_line_header_from_addr(obj as _);
             // when ptr >= cursor and the line header is not used, we should not mark it
             if ptr >= cursor && !line_header.get_used() {
                 return;
             }
-            if !is_candidate || line_header.is_pinned() {
+            if !is_candidate || obj_ref.byte_header.is_pinned() {
                 let block = &mut *block_p;
                 block.marked = true;
 
-                if line_header.get_marked() {
+                if obj_ref.is_marked() {
                     return;
                 }
             } else {
                 // evacuation logic
-                let (forward, h) = line_header.get_forward_start();
+                let (forward, h) = obj_ref.byte_header.get_forward_start();
                 let old_h = h;
                 // if forward is true or cas is failed, then it's forwarded by other thread.
-                let re = line_header.forward_cas(old_h);
+                let re = obj_ref.byte_header.forward_cas(old_h);
                 let shall_i_forward = !forward && re.is_ok();
                 if !shall_i_forward {
-                    spin_until!(line_header.get_forwarded());
+                    spin_until!(obj_ref.byte_header.get_forwarded());
 
                     let _ = self.correct_ptr(father, offset_from_head, ptr);
                     return;
                 }
 
                 // otherwise, we shall forward it
-                let atomic_ptr = head as *mut AtomicPtr<u8>;
+                let atomic_ptr = body as *mut AtomicPtr<u8>;
 
-                let obj_line_size = (*block_p).get_obj_line_size(idx);
                 let new_ptr =
-                    self.alloc_no_collect(obj_line_size * LINE_SIZE, ObjectType::Conservative);
+                    self.alloc_no_collect(body_size, obj_ref.obj_type);
                 if !new_ptr.is_null() {
                     let new_block = Block::from_obj_ptr(new_ptr);
                     // eprintln!("eva to block addr: {:p}", new_block);
                     debug_assert!(!new_block.is_eva_candidate());
                     let (new_line_header, _) = new_block.get_line_header_from_addr(new_ptr);
                     // 将数据复制到新的地址
-                    core::ptr::copy_nonoverlapping(head, new_ptr, obj_line_size * LINE_SIZE);
+                    core::ptr::copy_nonoverlapping(body, new_ptr, body_size);
                     // core::ptr::copy_nonoverlapping(line_header as * const u8, new_line_header as * mut u8, line_size);
 
                     // 将新指针写入老数据区开头
                     (*atomic_ptr).store(new_ptr, Ordering::SeqCst);
-                    log::trace!("gc {}: eva {:p} to {:p}", self.id, head, new_ptr);
+                    log::trace!("gc {}: eva {:p} to {:p}", self.id, body, new_ptr);
                     // eprintln!("gc {}: eva {:p} to {:p}", self.id, head, new_ptr);
                     debug_assert!(!new_line_header.get_marked());
                     debug_assert!(!new_line_header.get_forwarded());
                     new_line_header.set_marked(true);
                     new_block.marked = true;
-                    head = new_ptr;
+                    body = new_ptr;
                     // eprintln!("size {}", obj_line_size*LINE_SIZE);
                     self.correct_ptr(father, offset_from_head, ptr).expect(
                         "The thread evacuated pointer changed by another thread during evacuation.",
                     );
                     // 成功驱逐
-                    line_header.set_forwarded();
+                    obj_ref.byte_header.set_forwarded();
                 } else {
                     // 驱逐失败
                     panic!("gc: OOM during evacuation");
                 }
             }
-
-            line_header.set_marked(true);
+            if obj_ref.is_small() {
+                line_header.set_marked_conservative(true);
+            } else {
+                line_header.set_marked(true);
+                let mut cursor = obj as *mut u8;
+                let end = cursor.add(body_size);
+                while cursor < end {
+                    cursor = cursor.add(LINE_SIZE);
+                    let line_header = block.get_line_header_from_addr(cursor).0;
+                    line_header.set_marked(true);
+                }
+            }
             // let obj_type = line_header.get_obj_type();
-            self.push_job(head, ObjectType::Conservative)
+            match obj_ref.obj_type {
+                ObjectType::Atomic => {}
+                _ => self.push_job(body, obj_ref.obj_type),
+            }
         }
         // mark it if it is a big object
         else if self
@@ -622,7 +630,7 @@ impl Collector {
                 let obj_type = (*big_obj).header.get_obj_type();
                 match obj_type {
                     ObjectType::Atomic => {}
-                    _ => self.push_job(ptr, ObjectType::Conservative),
+                    _ => self.push_job(ptr, obj_type),
                 }
             }
         }
@@ -919,25 +927,25 @@ impl Collector {
             let mut guard = g.finalizers.lock();
             let mut remove_list = vec![];
             for (i, (p, a, f)) in guard.iter_mut().enumerate() {
-                // get block of p
-                let block = unsafe { Block::from_obj_ptr(*p) };
-                let head = unsafe { block.get_head_ptr(*p) };
-                let offset_from_head = unsafe { (*p).offset_from(head) };
-                let (line_header, _) = unsafe { block.get_line_header_from_addr(head) };
-                if line_header.get_forwarded()
-                    && !line_header.is_pinned()
-                    && line_header.get_marked()
-                {
-                    unsafe {
-                        _ = self.correct_ptr(p as *mut _ as _, offset_from_head, *p);
-                    }
-                }
-                if !line_header.get_marked() {
-                    // not marked, we should remove it
-                    remove_list.push(i);
-                    // call finalizer
-                    f(*a);
-                }
+                // // get block of p
+                // let block = unsafe { Block::from_obj_ptr(*p) };
+                // let head = unsafe { block.get_head_ptr(*p) };
+                // let offset_from_head = unsafe { (*p).offset_from(head) };
+                // let (line_header, _) = unsafe { block.get_line_header_from_addr(head) };
+                // if line_header.get_forwarded()
+                //     && !line_header.is_pinned()
+                //     && line_header.get_marked()
+                // {
+                //     unsafe {
+                //         _ = self.correct_ptr(p as *mut _ as _, offset_from_head, *p);
+                //     }
+                // }
+                // if !line_header.get_marked() {
+                //     // not marked, we should remove it
+                //     remove_list.push(i);
+                //     // call finalizer
+                //     f(*a);
+                // }
             }
             for i in remove_list.iter().rev() {
                 guard.swap_remove(*i);

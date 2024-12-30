@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use immix_obj::ImmixObject;
 use int_enum::IntEnum;
 use rustc_hash::FxHashMap;
 
@@ -8,8 +9,6 @@ use crate::consts::{BLOCK_SIZE, LINE_SIZE, NUM_LINES_PER_BLOCK};
 /// # Object type
 ///
 /// Object types. Used to support precise GC.
-///
-/// need 2 bits to represent.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntEnum)]
 pub enum ObjectType {
@@ -42,32 +41,24 @@ pub trait HeaderExt {
     fn get_obj_type(&self) -> ObjectType;
     fn set_used(&mut self, used: bool);
     fn set_marked(&mut self, marked: bool);
+    fn set_marked_conservative(&mut self, marked: bool);
     fn set_obj_type(&mut self, obj_type: ObjectType);
 }
 
 pub trait LineHeaderExt {
-    fn is_medium_body(&mut self) -> bool;
+    // fn is_medium_body(&mut self) -> bool;
     fn set_forwarded(&mut self);
     fn get_forwarded(&self) -> bool;
     fn get_forward_start(&self) -> (bool, LineHeader);
     fn forward_cas(&mut self, old: u8) -> Result<u8, u8>;
     fn is_pinned(&self) -> bool;
     fn pin(&mut self);
-    fn set_medium(&mut self);
+    // fn set_medium(&mut self);
 }
 
-#[inline(always)]
-fn count_next_zeros(line_map: &[u8; 256], idx: usize) -> usize {
-    let mut len = 0;
-    for i in line_map.iter().take(NUM_LINES_PER_BLOCK).skip(idx) {
-        if i & 1 == 0 {
-            len += 1;
-        } else {
-            break;
-        }
-    }
-    len
-}
+
+pub(crate)  mod immix_obj;
+
 
 /// A block is a 32KB memory region.
 ///
@@ -129,6 +120,20 @@ impl HeaderExt for u8 {
             *self &= !0b10;
         }
     }
+    #[inline]
+    fn set_marked_conservative(&mut self, marked: bool) {
+        if marked {
+            *self |= 0b10;
+        } else {
+            *self &= !0b10;
+        }
+        let next_byte = unsafe{(self as *mut u8).add(1)};
+        unsafe{if marked {
+            *next_byte |= 0b1;
+        } else {
+            *next_byte &= !0b1;
+        }}
+    }
 }
 impl LineHeaderExt for LineHeader {
     #[inline]
@@ -140,12 +145,12 @@ impl LineHeaderExt for LineHeader {
             (*atom_self).store(forwarded, Ordering::Release);
         }
     }
-    fn set_medium(&mut self) {
-        *self |= 0b10000000;
-    }
-    fn is_medium_body(&mut self) -> bool {
-        *self & 0b10000000 == 0b10000000
-    }
+    // fn set_medium(&mut self) {
+    //     *self |= 0b10000000;
+    // }
+    // fn is_medium_body(&mut self) -> bool {
+    //     *self & 0b10000000 == 0b10000000
+    // }
     #[inline]
     fn get_forward_start(&self) -> (bool, LineHeader) {
         let atom_self = self as *const u8 as *const AtomicU8;
@@ -214,16 +219,16 @@ impl Block {
         println!("line_map: {:?}", self.line_map);
     }
 
-    pub fn get_obj_line_size(&mut self, idx: usize) -> usize {
-        // 往后遍历获取自身大小
-        let mut line_size = 1;
-        while idx + line_size < NUM_LINES_PER_BLOCK
-            && self.line_map[idx + line_size].is_medium_body()
-        {
-            line_size += 1;
-        }
-        line_size
-    }
+    // pub fn get_obj_line_size(&mut self, idx: usize) -> usize {
+    //     // 往后遍历获取自身大小
+    //     let mut line_size = 1;
+    //     while idx + line_size < NUM_LINES_PER_BLOCK
+    //         && self.line_map[idx + line_size].is_medium_body()
+    //     {
+    //         line_size += 1;
+    //     }
+    //     line_size
+    // }
 
     /// return the used size of the block
     pub fn get_size(&self) -> usize {
@@ -274,15 +279,33 @@ impl Block {
         let mut hole_flag = false;
         let mut cursor = None;
         let mut hole_end = None;
+        let mut offset = std::ptr::null_mut();
         while idx < NUM_LINES_PER_BLOCK {
-            if !self.line_map[idx].is_pinned() {
-                if self.line_map[idx].get_forwarded() && self.line_map[idx].get_marked() {
-                    self.line_map[idx].set_marked(false);
-                }
-                // 如果pin了，需要把记号一直保留，这里没pin所以直接清除
-                self.line_map[idx] &= !0b1100000; // unset forward bits
-            }
+            // if !self.line_map[idx].is_pinned() {
+            //     if self.line_map[idx].get_forwarded() && self.line_map[idx].get_marked() {
+            //         self.line_map[idx].set_marked(false);
+            //     }
+            //     // 如果pin了，需要把记号一直保留，这里没pin所以直接清除
+            //     self.line_map[idx] &= !0b1100000; // unset forward bits
+            // }
             if self.line_map[idx].get_marked() {
+                let mut line = self.get_nth_line(idx);
+                if line < offset {
+                    line = offset;
+                }
+                while line < line.add(LINE_SIZE) {
+                    let obj = ImmixObject::from_ptr(line);
+                    if (*obj).is_valid() {
+                        (*obj).correct_header();
+                        line = line.add((*obj).size as usize);
+                        offset = line;
+                    } else {
+                        line = line.add(8);
+                    }
+                    
+                }
+
+
                 if cursor.is_some() && hole_end.is_none() {
                     hole_end = Some(self.get_nth_line(idx));
                 }
@@ -331,45 +354,6 @@ impl Block {
         (used_lines, self.available_line_num)
     }
 
-    /// # find_next_hole
-    ///
-    /// input a tuple (u8, u8) representing previous hole
-    ///
-    /// Find the next hole in the block.
-    ///
-    /// Return the start line index and the length of the hole (u8, u8).
-    ///
-    /// If no hole found, return `None`.
-    #[inline(always)]
-    pub fn find_next_hole(
-        &self,
-        prev_hole: (usize, usize),
-        size_line: usize,
-    ) -> Option<(usize, usize)> {
-        let mut idx = prev_hole.0 + prev_hole.1;
-        let mut len = 0;
-        let line_map: &[u8; 256] = &self.line_map;
-
-        while idx < NUM_LINES_PER_BLOCK {
-            if line_map[idx] & 1 == 0 {
-                len += 1;
-                if len >= size_line {
-                    return Some((idx - len + 1, len + count_next_zeros(line_map, idx + 1)));
-                }
-            } else {
-                if len >= size_line {
-                    return Some((idx - len, len + count_next_zeros(line_map, idx)));
-                } else if len > 0 {
-                    return None;
-                }
-                len = 0;
-            }
-
-            idx += 1;
-        }
-
-        None
-    }
 
     /// # get_nth_line
     ///
@@ -404,44 +388,44 @@ impl Block {
         &mut *(block_start as *mut Self)
     }
 
-    /// # get_head_ptr
-    ///
-    /// A pointer in the graph may not point to the start position of the
-    /// space we allocated for it. Consider the following example:
-    ///
-    /// ```pl
-    ///
-    /// struct A {
-    ///     a: u8;
-    ///     b: u8;
-    /// }
-    ///
-    /// let a = A { a: 1, b: 2 };
-    /// let ptr = &a.b; // where ptr is a pointer to the field b, what we want is a pointer to the struct A
-    /// ```
-    ///
-    /// This function is used to get the pointer to the start position of the space we allocated for the object,
-    /// from a pointer in the graph. e.g. in the above example, we want to get a pointer to the struct A, by
-    /// passing the pointer to the field b.
-    pub unsafe fn get_head_ptr(&mut self, ptr: *mut u8) -> *mut u8 {
-        let mut idx = self.get_line_idx_from_addr(ptr);
-        debug_assert!(idx >= 3);
-        let mut header = self.get_nth_line_header(idx);
-        // 如果是head，直接返回
-        if !header.is_medium_body() {
-            return self.get_nth_line(idx);
-        }
-        idx -= 1;
-        header = self.get_nth_line_header(idx);
-        // 否则往前找到head
-        while header.is_medium_body() {
-            debug_assert!(idx >= 3);
-            header = self.get_nth_line_header(idx - 1);
-            idx -= 1;
-        }
-        // 返回head的地址
-        self.get_nth_line(idx)
-    }
+    // /// # get_head_ptr
+    // ///
+    // /// A pointer in the graph may not point to the start position of the
+    // /// space we allocated for it. Consider the following example:
+    // ///
+    // /// ```pl
+    // ///
+    // /// struct A {
+    // ///     a: u8;
+    // ///     b: u8;
+    // /// }
+    // ///
+    // /// let a = A { a: 1, b: 2 };
+    // /// let ptr = &a.b; // where ptr is a pointer to the field b, what we want is a pointer to the struct A
+    // /// ```
+    // ///
+    // /// This function is used to get the pointer to the start position of the space we allocated for the object,
+    // /// from a pointer in the graph. e.g. in the above example, we want to get a pointer to the struct A, by
+    // /// passing the pointer to the field b.
+    // pub unsafe fn get_head_ptr(&mut self, ptr: *mut u8) -> *mut u8 {
+    //     let mut idx = self.get_line_idx_from_addr(ptr);
+    //     debug_assert!(idx >= 3);
+    //     let mut header = self.get_nth_line_header(idx);
+    //     // 如果是head，直接返回
+    //     if !header.is_medium_body() {
+    //         return self.get_nth_line(idx);
+    //     }
+    //     idx -= 1;
+    //     header = self.get_nth_line_header(idx);
+    //     // 否则往前找到head
+    //     while header.is_medium_body() {
+    //         debug_assert!(idx >= 3);
+    //         header = self.get_nth_line_header(idx - 1);
+    //         idx -= 1;
+    //     }
+    //     // 返回head的地址
+    //     self.get_nth_line(idx)
+    // }
 
     pub unsafe fn get_line_header_from_addr(&mut self, addr: *mut u8) -> (&mut LineHeader, usize) {
         let idx = self.get_line_idx_from_addr(addr);
@@ -546,29 +530,30 @@ impl Block {
         self.available_line_num = avai;
     }
 
-    pub unsafe fn alloc(&mut self, size: usize) -> AllocResult {
+    pub unsafe fn alloc(&mut self, req_size: usize, tp:ObjectType) -> AllocResult {
         if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
             return AllocResult::Exhausted;
         }
         // doing a bump allocation
-        // real alloc size must be a multiple of 8 bytes
-        let size = (size + 7) / 8 * 8;
+        // real alloc size must be a multiple of 8 bytes, and it has a 8 bytes header
+        let body_size = (req_size + 7) / 8 * 8;
+        let size = body_size + 8;
         // check if is small object
         let is_small = size <= LINE_SIZE;
         if is_small {
-            // if small, check if it exceeds current line
-            let current_line_remains = self.cursor.align_offset(LINE_SIZE);
-            if current_line_remains < size && current_line_remains != 0 {
-                // if exceeds, move cursor to next line
-                self.cursor = self.cursor.add(current_line_remains);
-                if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
+            let obj_end = self.cursor.add(size);
+            if obj_end >= self.hole_end {
+                if self.bump_next_hole().is_none() {
                     return AllocResult::Exhausted;
                 }
+                
             }
+
             // bump allocation
             let ptr = self.cursor;
+            let obj = ImmixObject::new(ptr, body_size as _, tp);
             self.cursor = self.cursor.add(size);
-            return AllocResult::Success(ptr);
+            return AllocResult::Success((*obj).get_body());
         }
         let cursor = self.cursor.add(self.cursor.align_offset(LINE_SIZE));
         // check if current hole is enough
@@ -577,14 +562,9 @@ impl Block {
         }
         // bump allocation
         let ptr = cursor;
-        // set all lines except the first one medium flag
-        let idx = self.get_line_idx_from_addr(ptr);
-        for i in 1..(size + LINE_SIZE - 1) / LINE_SIZE {
-            let header = self.line_map.get_unchecked_mut(idx + i);
-            header.set_medium();
-        }
-        self.cursor = cursor.add(size);
-        AllocResult::Success(ptr)
+        let obj = ImmixObject::new(ptr, body_size as _, tp);
+        self.cursor = self.cursor.add(size);
+        return AllocResult::Success((*obj).get_body());
     }
 }
 
@@ -642,21 +622,4 @@ mod tests {
         };
     }
 
-    #[test]
-    fn test_get_head_ptr() {
-        unsafe {
-            let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
-            let block = &mut *ga.get_block();
-            block.cursor = block.cursor.add(64);
-            let l = block.get_nth_line_header(100);
-            *l = 0b10;
-            let l = block.get_nth_line_header(101);
-            *l = 0b10000000;
-            let l = block.get_nth_line_header(103);
-            *l = 0b10;
-            let ptr = block.get_nth_line(101).add(8);
-            let head = block.get_head_ptr(ptr);
-            assert_eq!(head, block.get_nth_line(100));
-        };
-    }
 }

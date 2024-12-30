@@ -11,6 +11,7 @@ use std::{
 };
 
 use crossbeam_deque::Stealer;
+use immix_obj::ImmixObject;
 pub use int_enum::IntEnum;
 use lazy_static::lazy_static;
 use libc::malloc;
@@ -421,17 +422,13 @@ pub fn remove_coro_stack(stack: *mut u8) {
 }
 
 pub unsafe fn pin(obj: *mut u8) {
-    let b = Block::from_obj_ptr(obj);
-    let head = b.get_head_ptr(obj);
-    let (lineheader, _) = b.get_line_header_from_addr(head);
-    lineheader.pin();
+    let obj = ImmixObject::from_unaligned_ptr(obj);
+    obj.as_mut().unwrap_unchecked().byte_header.pin();
 }
 
 pub unsafe fn is_pinned(obj: *mut u8) -> bool {
-    let b = Block::from_obj_ptr(obj);
-    let head = b.get_head_ptr(obj);
-    let (lineheader, _) = b.get_line_header_from_addr(head);
-    lineheader.is_pinned()
+    let obj = ImmixObject::from_unaligned_ptr(obj);
+    obj.as_mut().unwrap_unchecked().byte_header.is_pinned()
 }
 
 /// # set evacuation
