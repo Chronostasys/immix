@@ -265,6 +265,9 @@ impl ThreadLocalAllocator {
         match res {
             crate::AllocResult::Success(p) => {
                 self.curr_block = *f;
+                // if self.collect_mode {
+                //     unsafe{(**f).eva_allocated = true;}
+                // }
                 p
             }
             crate::AllocResult::Fail => {

@@ -22,10 +22,10 @@ use crate::STACK_MAP;
 use crate::{
     allocator::{GlobalAllocator, ThreadLocalAllocator},
     block::{Block, LineHeaderExt, ObjectType},
-    gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, SendableMarkJob, ENABLE_EVA,
-    FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING,
-    GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK,
-    SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
+    gc_is_auto_collect_enabled, spin_until, Function, HeaderExt, SendableMarkJob, BLOCK_SIZE,
+    ENABLE_EVA, FREE_SPACE_DIVISOR, GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND,
+    GC_RUNNING, GC_STW_COUNT, GC_SWEEPING, GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE,
+    NUM_LINES_PER_BLOCK, SHOULD_EXIT, THRESHOLD_PROPORTION, USE_SHADOW_STACK,
 };
 
 pub static SLOW_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -276,6 +276,12 @@ impl Collector {
             self.collect_fast_unwind(sp);
             return;
         }
+        #[cfg(debug_assertions)]
+        if !GC_SWEEPING.load(Ordering::Acquire) {
+            self.collect_fast_unwind(sp);
+            return;
+        }
+
         let mut status = self.status.borrow_mut();
         if (unsafe {
             self.thread_local_allocator
@@ -457,12 +463,6 @@ impl Collector {
                     let ptr = block.get_nth_line(idx);
                     for i in 0..LINE_SIZE / 8 {
                         let p = ptr.add(i * 8);
-                        if p >= block.get_cursor() {
-                            // important: we may continue to allocate in this block,
-                            // so we should stop at cursor to make sure we don't falsely
-                            // mark a space that's not allocated yet.
-                            return;
-                        }
                         self.mark_ptr(p);
                     }
 
@@ -474,6 +474,7 @@ impl Collector {
                     if !line_header.is_medium_body() {
                         break;
                     }
+                    line_header.set_marked(true);
                 }
             } else if self
                 .thread_local_allocator
@@ -523,10 +524,12 @@ impl Collector {
             .as_mut()
             .unwrap_unchecked()
             .in_heap(ptr)
+            && ptr as usize % BLOCK_SIZE >= LINE_SIZE * 3
         {
             let block_p: *mut Block = Block::from_obj_ptr(ptr) as *mut _;
 
             let block = &mut *block_p;
+            let cursor = block.get_cursor();
             let is_candidate = block.is_eva_candidate();
             let mut head = block.get_head_ptr(ptr);
             if head.is_null() {
@@ -534,6 +537,10 @@ impl Collector {
             }
             let offset_from_head = ptr.offset_from(head);
             let (line_header, idx) = block.get_line_header_from_addr(head);
+            // when ptr >= cursor and the line header is not used, we should not mark it
+            if ptr >= cursor && !line_header.get_used() {
+                return;
+            }
             if !is_candidate || line_header.is_pinned() {
                 let block = &mut *block_p;
                 block.marked = true;
@@ -579,6 +586,7 @@ impl Collector {
                     new_line_header.set_marked(true);
                     new_block.marked = true;
                     head = new_ptr;
+                    // eprintln!("size {}", obj_line_size*LINE_SIZE);
                     self.correct_ptr(father, offset_from_head, ptr).expect(
                         "The thread evacuated pointer changed by another thread during evacuation.",
                     );
@@ -1143,6 +1151,7 @@ impl Collector {
         //     /* Interval ID */ self.id as _,
         //     /* Interval name */ "collect_fast_unwind_ex",
         // );
+        // eprintln!("collect");
         #[cfg(feature = "gc_profile")]
         eprintln!(
             "gc {} start collect at {:?}",
