@@ -92,6 +92,7 @@ pub struct Block {
     /// 是否被标记
     pub marked: bool,
     eva_target: bool,
+    // pub eva_allocated: bool,
 }
 
 impl HeaderExt for u8 {
@@ -156,7 +157,7 @@ impl LineHeaderExt for LineHeader {
     fn get_forwarded(&self) -> bool {
         let atom_self = self as *const u8 as *const AtomicU8;
         let load = unsafe { (*atom_self).load(Ordering::Acquire) };
-        load & 0b100000 == 0b100000
+        load & 0b1100000 == 0b1100000
     }
     #[inline]
     fn forward_cas(&mut self, old: u8) -> Result<u8, u8> {
@@ -193,6 +194,7 @@ impl Block {
                 hole_num: 1,
                 available_line_num: NUM_LINES_PER_BLOCK - 3,
                 eva_target: false,
+                // eva_allocated:false,
             });
 
             &mut *ptr
@@ -253,6 +255,7 @@ impl Block {
         self.eva_target = false;
         self.hole_end = unsafe { ptr.add(BLOCK_SIZE) };
         self.end = unsafe { ptr.add(BLOCK_SIZE) };
+        // self.eva_allocated = false;
     }
 
     pub fn get_cursor(&self) -> *mut u8 {
@@ -319,6 +322,7 @@ impl Block {
         self.hole_num = hole_num;
         self.marked = false;
         self.eva_target = false;
+        // self.eva_allocated = false;
         if let Some(count) = (*mark_histogram).get_mut(&self.hole_num) {
             *count += used_lines;
         } else {
@@ -389,11 +393,14 @@ impl Block {
     ///
     /// The caller must ensure that the pointer is valid.
     pub unsafe fn from_obj_ptr(ptr: *mut u8) -> &'static mut Self {
-        // ptr may not be at the start of the block
         // the block start address is the nearest multiple of BLOCK_SIZE
         // get the block start address
         let ptr = ptr as usize;
-        let block_start = ptr - (ptr % BLOCK_SIZE);
+        let moded = ptr % BLOCK_SIZE;
+        let mut block_start = ptr - (moded);
+        if moded == 0 {
+            block_start -= BLOCK_SIZE;
+        }
         &mut *(block_start as *mut Self)
     }
 
@@ -454,7 +461,7 @@ impl Block {
     ///
     /// The caller must ensure that the address is in the block.
     unsafe fn get_line_idx_from_addr(&self, addr: *mut u8) -> usize {
-        debug_assert!(addr as *const u8 >= self as *const Self as *const u8);
+        debug_assert!(addr as *const u8 >= (self as *const Self as *const u8).add(LINE_SIZE * 3));
         debug_assert!((addr as *const u8) < (self as *const Self as *const u8).add(BLOCK_SIZE));
         (addr as usize - self as *const Self as usize) / LINE_SIZE
     }
@@ -480,6 +487,9 @@ impl Block {
     }
 
     pub unsafe fn bump_next_hole(&mut self) -> Option<()> {
+        if self.cursor >= self.hole_end {
+            return Option::<()>::None;
+        }
         // update cursor, hole_end to the next hole, if there is no hole, set cursor to the end
         // decrease hole_num
         let next_idx = self.get_line_idx_from_addr(self.hole_end);
@@ -509,6 +519,12 @@ impl Block {
     pub fn count_holes_and_avai_lines(&mut self) {
         // count from cursor to the end
         let alined_cursor = unsafe { self.cursor.add(self.cursor.align_offset(LINE_SIZE)) };
+        self.cursor = alined_cursor;
+        if alined_cursor >= self.end {
+            self.hole_num = 0;
+            self.available_line_num = 0;
+            return;
+        }
         let idx = unsafe { self.get_line_idx_from_addr(alined_cursor) };
         let mut holes = 0;
         let mut avai = 0;
@@ -563,7 +579,7 @@ impl Block {
         let ptr = cursor;
         // set all lines except the first one medium flag
         let idx = self.get_line_idx_from_addr(ptr);
-        for i in 1..=size / LINE_SIZE {
+        for i in 1..(size + LINE_SIZE - 1) / LINE_SIZE {
             let header = self.line_map.get_unchecked_mut(idx + i);
             header.set_medium();
         }
