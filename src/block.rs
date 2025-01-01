@@ -602,6 +602,7 @@ mod tests {
         unsafe {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
             let block = &mut *ga.get_block();
+            block.reset_header();
 
             block.cursor = block.cursor.add(64);
             block.count_holes_and_avai_lines();

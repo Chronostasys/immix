@@ -871,8 +871,14 @@ impl Collector {
                     GC_SWEEPPING_NUM.store(*c, Ordering::Release);
                     return false;
                 }
+                if SHOULD_EXIT.load(Ordering::Acquire) {
+                    return false;
+                }
                 !GC_MARKING.load(Ordering::Acquire)
             });
+            if SHOULD_EXIT.load(Ordering::Acquire) {
+                return;
+            }
             unsafe {
                 self.thread_local_allocator
                     .as_mut()
@@ -1137,9 +1143,15 @@ impl Collector {
                     .as_mut()
                     .unwrap()
                     .iter()
-                    .for_each(|(root, size)| {
-                        for i in 0..(*size + 7) / 8 {
-                            self.mark_stack_offset(*root, i * 8);
+                    .for_each(|(root, tp)| {
+                        // self.push_job(*root, *tp);
+                        match *tp {
+                            ObjectType::Atomic => {}
+                            // ObjectType::Trait => self.mark_trait(*root),
+                            // ObjectType::Complex => self.mark_complex(*root),
+                            // ObjectType::Pointer => self.mark_ptr(*root),
+                            // ObjectType::Conservative => self.mark_conservative(*root),
+                            _ => self.push_job(*root, *tp),
                         }
                     });
             }
@@ -1313,6 +1325,9 @@ impl Collector {
                 .set_collect_mode(true);
         }
         self.mark_fast_unwind(sp);
+        if SHOULD_EXIT.load(Ordering::Acquire) {
+            return;
+        }
         // let mark_time = time.elapsed();
         let (_used, free) = self.sweep();
         // let sweep_time = time.elapsed() - mark_time;
@@ -1363,6 +1378,9 @@ impl Collector {
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn stuck_fast_unwind(&mut self, sp: *mut u8) {
+        if SHOULD_EXIT.load(Ordering::Relaxed) {
+            return;
+        }
         self.former_registers = unsafe { *self.registers.get() };
         self.stuck_sp = sp;
         log::info!("gc {}: stucking...", self.id);
@@ -1377,11 +1395,13 @@ impl Collector {
             let c = c.as_mut().unwrap();
             let sender = c.stuck_stopped_notify_chan.0.clone();
             GLOBAL_ALLOCATOR.0.as_ref().unwrap().pool.execute(move || {
+                crate::STUCK_COUNT.fetch_add(1, Ordering::SeqCst);
                 // NOTE: **VERY ESSENCIAL** to make sure the function here will not
                 // voluntarily start a new gc
                 let mut first = true;
                 loop {
                     if SHOULD_EXIT.load(Ordering::Relaxed) {
+                        crate::STUCK_COUNT.fetch_sub(1, Ordering::SeqCst);
                         break;
                     }
                     let mut mutex = STUCK_MUTEX.lock();
@@ -1392,6 +1412,7 @@ impl Collector {
                     if endreceiver.try_recv().is_ok() {
                         drop(mutex);
                         sender.send(()).unwrap();
+                        crate::STUCK_COUNT.fetch_sub(1, Ordering::SeqCst);
                         break;
                     } else {
                         if !GC_RUNNING.load(Ordering::Acquire) {
@@ -1431,6 +1452,9 @@ impl Collector {
     }
 
     pub fn unstuck(&mut self) {
+        if SHOULD_EXIT.load(Ordering::Relaxed) {
+            return;
+        }
         log::info!("gc {}: unstucking...", self.id);
         self.stuck_stop_notify_chan.send(()).unwrap();
         STUCK_COND.notify_all();
