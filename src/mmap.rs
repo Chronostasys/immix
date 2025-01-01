@@ -131,11 +131,13 @@ mod _unix {
 
         pub fn commit(&self, page: *mut u8, size: usize) -> bool {
             unsafe {
-                libc::madvise(
+                let re = libc::madvise(
                     page as *mut _,
                     size as _,
                     libc::MADV_WILLNEED | libc::MADV_RANDOM,
-                ) == 0
+                );
+                debug_assert_eq!(re, 0);
+                re == 0
             }
         }
     }

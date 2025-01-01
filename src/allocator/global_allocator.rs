@@ -291,10 +291,9 @@ impl GlobalAllocator {
         //     }
         // }
         // drop(lock);
+        #[cfg(feature = "zero_init")]
         unsafe {
-            #[cfg(feature = "zero_init")]
             core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
-            (*block).reset_header();
         }
         // let ep = start.elapsed().as_nanos();
         // EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
@@ -333,10 +332,9 @@ impl GlobalAllocator {
             return block;
         }
         self.set_block_bitmap(block, true);
+        #[cfg(feature = "zero_init")]
         unsafe {
-            #[cfg(feature = "zero_init")]
             core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
-            (*block).reset_header();
         }
         block
     }
