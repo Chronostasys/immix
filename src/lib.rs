@@ -8,6 +8,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use crossbeam_deque::Stealer;
@@ -62,16 +63,16 @@ lazy_static! {
     };
 }
 
-pub fn register_global(p: *mut u8, size: i32) {
+pub fn register_global(p: *mut u8, tp: ObjectType) {
     unsafe {
-        STACK_MAP.global_roots.as_mut().unwrap().push((p, size));
+        STACK_MAP.global_roots.as_mut().unwrap().push((p, tp));
     }
 }
 
 #[cfg(feature = "llvm_stackmap")]
 pub struct StackMapWrapper {
     pub map: *mut FxHashMap<*const u8, Function>,
-    pub global_roots: *mut Vec<(*mut u8, i32)>,
+    pub global_roots: *mut Vec<(*mut u8, ObjectType)>,
 }
 #[cfg(feature = "llvm_stackmap")]
 unsafe impl Sync for StackMapWrapper {}
@@ -529,8 +530,12 @@ pub unsafe fn set_shadow_stack_addr(addr: *mut u8) {
 pub fn exit_block() {
     SHOULD_EXIT.store(true, Ordering::SeqCst);
     let mut v = GC_COLLECTOR_COUNT.lock();
-    if v.0 == 0 {
-        return;
-    }
-    GC_MARK_COND.wait_while(&mut v, |(c, _, _)| *c == 0);
+    GC_MARK_COND.notify_all();
+    GC_MARK_COND.wait_while_for(
+        &mut v,
+        |(c, _, _)| *c != 0 || STUCK_COUNT.load(Ordering::SeqCst) != 0,
+        Duration::from_micros(100),
+    );
 }
+
+pub(crate) static STUCK_COUNT: AtomicUsize = AtomicUsize::new(0);
