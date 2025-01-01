@@ -255,7 +255,7 @@ impl ThreadLocalAllocator {
                 if let Some(ff) = ff {
                     f = ff;
                 } else {
-                    return self.normal_alloc(size,obj_type);
+                    return self.normal_alloc(size, obj_type);
                 }
             }
         }
@@ -268,6 +268,7 @@ impl ThreadLocalAllocator {
                 // if self.collect_mode {
                 //     unsafe{(**f).eva_allocated = true;}
                 // }
+                // eprintln!("normal alloc {:p} size {}", p, size);
                 p
             }
             crate::AllocResult::Fail => {
@@ -306,7 +307,7 @@ impl ThreadLocalAllocator {
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
         let re = unsafe {
-            match (*new_block).alloc(size,obj_type) {
+            match (*new_block).alloc(size, obj_type) {
                 crate::AllocResult::Success(p) => p,
                 _ => unreachable!(),
             }
@@ -370,7 +371,13 @@ impl ThreadLocalAllocator {
             unsafe { (*self.global_allocator).get_block() }
         };
 
-        unsafe { b.as_mut().map(|b| b.set_eva_threshold(NUM_LINES_PER_BLOCK)) };
+        unsafe {
+            b.as_mut().map(|b| {
+                b.reset_header();
+                b.free = false;
+            })
+        };
+
         b
     }
 
@@ -420,7 +427,7 @@ impl ThreadLocalAllocator {
                     }
                 } else {
                     free_lines += NUM_LINES_PER_BLOCK - 3;
-                    block.as_mut().unwrap_unchecked().reset_header();
+                    block.as_mut().unwrap_unchecked().free = true;
                     free_blocks.push(block);
                 }
             }
@@ -439,7 +446,6 @@ impl ThreadLocalAllocator {
             for _ in 0..over_flow {
                 unsafe {
                     let b = self.eva_blocks.pop().unwrap_unchecked();
-                    (*b).reset_header();
                     free_blocks.push(b);
                 }
             }
@@ -464,6 +470,7 @@ impl ThreadLocalAllocator {
                 == 0
         );
         free_blocks.sort_unstable();
+        debug_assert!(self.blocks_to_return.is_empty());
         self.blocks_to_return = free_blocks;
 
         let curr = self.recyclable_blocks.front().cloned();
@@ -474,6 +481,9 @@ impl ThreadLocalAllocator {
                 .unwrap_or_else(|| self.get_new_block());
             if self.curr_block.is_null() {
                 panic!("OOM! GC does not free enough memory!");
+            }
+            unsafe {
+                self.curr_block.as_mut().unwrap_unchecked().free = false;
             }
             self.recyclable_blocks.push_back(self.curr_block);
         } else {

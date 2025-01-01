@@ -56,9 +56,7 @@ pub trait LineHeaderExt {
     // fn set_medium(&mut self);
 }
 
-
-pub(crate)  mod immix_obj;
-
+pub(crate) mod immix_obj;
 
 /// A block is a 32KB memory region.
 ///
@@ -83,6 +81,7 @@ pub struct Block {
     /// 是否被标记
     pub marked: bool,
     eva_target: bool,
+    pub(crate) free: bool,
     // pub eva_allocated: bool,
 }
 
@@ -127,12 +126,14 @@ impl HeaderExt for u8 {
         } else {
             *self &= !0b10;
         }
-        let next_byte = unsafe{(self as *mut u8).add(1)};
-        unsafe{if marked {
-            *next_byte |= 0b1;
-        } else {
-            *next_byte &= !0b1;
-        }}
+        let next_byte = unsafe { (self as *mut u8).add(1) };
+        unsafe {
+            if marked {
+                *next_byte |= 0b10;
+            } else {
+                *next_byte &= !0b10;
+            }
+        }
     }
 }
 impl LineHeaderExt for LineHeader {
@@ -199,6 +200,7 @@ impl Block {
                 hole_num: 1,
                 available_line_num: NUM_LINES_PER_BLOCK - 3,
                 eva_target: false,
+                free: true,
                 // eva_allocated:false,
             });
 
@@ -252,6 +254,7 @@ impl Block {
     }
     pub fn reset_header(&mut self) {
         let ptr = self as *mut Self as *mut u8;
+        // assert!(ptr.align_offset(BLOCK_SIZE) == 0);
         self.cursor = unsafe { ptr.add(LINE_SIZE * 3) };
         self.line_map = [0; NUM_LINES_PER_BLOCK];
         self.marked = false;
@@ -260,7 +263,14 @@ impl Block {
         self.eva_target = false;
         self.hole_end = unsafe { ptr.add(BLOCK_SIZE) };
         self.end = unsafe { ptr.add(BLOCK_SIZE) };
+        // unsafe{self.cursor.write_bytes(0, BLOCK_SIZE - LINE_SIZE * 3);}
         // self.eva_allocated = false;
+    }
+
+    pub fn zero_init(&mut self) {
+        unsafe {
+            self.cursor.write_bytes(0, BLOCK_SIZE - LINE_SIZE * 3);
+        }
     }
 
     pub fn get_cursor(&self) -> *mut u8 {
@@ -290,21 +300,28 @@ impl Block {
             // }
             if self.line_map[idx].get_marked() {
                 let mut line = self.get_nth_line(idx);
+                let end = line.add(LINE_SIZE);
                 if line < offset {
                     line = offset;
                 }
-                while line < line.add(LINE_SIZE) {
+                while line < end {
                     let obj = ImmixObject::from_ptr(line);
-                    if (*obj).is_valid() {
+                    if (*obj).is_valid() && (*obj).is_marked() {
                         (*obj).correct_header();
                         line = line.add((*obj).size as usize);
                         offset = line;
+                        debug_assert!(
+                            !(*obj).is_marked()
+                                || self
+                                    .get_line_header_from_addr(line.offset(-1))
+                                    .0
+                                    .get_marked()
+                        )
                     } else {
+                        line.write_bytes(0, 8);
                         line = line.add(8);
                     }
-                    
                 }
-
 
                 if cursor.is_some() && hole_end.is_none() {
                     hole_end = Some(self.get_nth_line(idx));
@@ -317,13 +334,13 @@ impl Block {
                 used_lines += 1;
                 // get next line, check is medium flag
                 idx += 1;
-                while idx < NUM_LINES_PER_BLOCK && self.line_map[idx] & 0b10000000 == 0b10000000 {
-                    // set used bit
-                    self.line_map[idx] &= !0b10;
-                    self.line_map[idx] |= 0b1;
-                    used_lines += 1;
-                    idx += 1;
-                }
+                // while idx < NUM_LINES_PER_BLOCK && self.line_map[idx] & 0b10000000 == 0b10000000 {
+                //     // set used bit
+                //     self.line_map[idx] &= !0b10;
+                //     self.line_map[idx] |= 0b1;
+                //     used_lines += 1;
+                //     idx += 1;
+                // }
             } else {
                 if cursor.is_none() {
                     cursor = Some(self.get_nth_line(idx));
@@ -332,14 +349,20 @@ impl Block {
                     hole_num += 1;
                     hole_flag = true;
                 }
+                let line = self.get_nth_line(idx);
+                line.write_bytes(0, LINE_SIZE);
                 self.line_map[idx] &= 0;
                 idx += 1;
             }
         }
 
         if let Some(cursor) = cursor {
+            debug_assert!(!cursor.is_null());
             self.cursor = cursor;
             self.hole_end = hole_end.unwrap_or(self.end);
+        } else {
+            self.cursor = self.end;
+            self.hole_end = self.end;
         }
         self.available_line_num = NUM_LINES_PER_BLOCK - 3 - used_lines;
         self.hole_num = hole_num;
@@ -354,7 +377,6 @@ impl Block {
         (used_lines, self.available_line_num)
     }
 
-
     /// # get_nth_line
     ///
     /// get the line at nth index as * mut u8
@@ -364,6 +386,7 @@ impl Block {
     /// The caller must ensure that the index is valid.
     pub unsafe fn get_nth_line(&mut self, idx: usize) -> *mut u8 {
         debug_assert!(idx < NUM_LINES_PER_BLOCK);
+        debug_assert!(idx >= 3);
         (self as *mut Self as *mut u8).add(idx * LINE_SIZE)
     }
 
@@ -434,7 +457,9 @@ impl Block {
 
     pub unsafe fn get_nth_line_header(&mut self, idx: usize) -> &mut LineHeader {
         debug_assert!(idx < NUM_LINES_PER_BLOCK);
-        self.line_map.get_unchecked_mut(idx)
+        debug_assert!(idx >= 3);
+        let h = self.line_map.get_unchecked_mut(idx);
+        h
     }
 
     /// # get_line_idx_from_addr
@@ -471,7 +496,7 @@ impl Block {
     }
 
     pub unsafe fn bump_next_hole(&mut self) -> Option<()> {
-        if self.cursor >= self.hole_end {
+        if self.hole_end >= self.end {
             return Option::<()>::None;
         }
         // update cursor, hole_end to the next hole, if there is no hole, set cursor to the end
@@ -530,7 +555,7 @@ impl Block {
         self.available_line_num = avai;
     }
 
-    pub unsafe fn alloc(&mut self, req_size: usize, tp:ObjectType) -> AllocResult {
+    pub unsafe fn alloc(&mut self, req_size: usize, tp: ObjectType) -> AllocResult {
         if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
             return AllocResult::Exhausted;
         }
@@ -542,29 +567,29 @@ impl Block {
         let is_small = size <= LINE_SIZE;
         if is_small {
             let obj_end = self.cursor.add(size);
-            if obj_end >= self.hole_end {
-                if self.bump_next_hole().is_none() {
-                    return AllocResult::Exhausted;
-                }
-                
+            if obj_end >= self.hole_end && self.bump_next_hole().is_none() {
+                return AllocResult::Exhausted;
             }
 
             // bump allocation
             let ptr = self.cursor;
-            let obj = ImmixObject::new(ptr, body_size as _, tp);
+            let obj = ImmixObject::new(ptr, size as _, tp);
             self.cursor = self.cursor.add(size);
-            return AllocResult::Success((*obj).get_body());
+            let body = (*obj).get_body();
+            // body.write_bytes(0, body_size);
+            return AllocResult::Success(body);
         }
-        let cursor = self.cursor.add(self.cursor.align_offset(LINE_SIZE));
         // check if current hole is enough
-        if cursor.add(size) >= self.hole_end {
+        if self.cursor.add(size) >= self.hole_end {
             return AllocResult::Fail;
         }
         // bump allocation
-        let ptr = cursor;
-        let obj = ImmixObject::new(ptr, body_size as _, tp);
+        let obj = ImmixObject::new(self.cursor, size as _, tp);
         self.cursor = self.cursor.add(size);
-        return AllocResult::Success((*obj).get_body());
+        let body = (*obj).get_body();
+        debug_assert!(self.cursor.align_offset(8) == 0);
+        // body.write_bytes(0, body_size);
+        AllocResult::Success(body)
     }
 }
 
@@ -606,20 +631,21 @@ mod tests {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
             let block = &mut *ga.get_block();
             block.cursor = block.cursor.add(64);
+            let l = block.get_nth_line_header(3);
+            *l = 0b10;
             let l = block.get_nth_line_header(100);
             *l = 0b10;
             let l = block.get_nth_line_header(101);
-            *l = 0b10000000;
+            *l = 0b10;
             let l = block.get_nth_line_header(103);
             *l = 0b10;
             let mut gram = Default::default();
             block.correct_header(&mut gram);
             assert_eq!(block.hole_num, 3);
-            assert_eq!(block.available_line_num, NUM_LINES_PER_BLOCK - 3 - 3);
+            assert_eq!(block.available_line_num, NUM_LINES_PER_BLOCK - 3 - 4);
             let cursor = block.cursor;
-            assert_eq!(cursor, block.get_nth_line(3));
-            assert_eq!(gram.get(&3), Some(&3));
+            assert_eq!(cursor, block.get_nth_line(4));
+            assert_eq!(gram.get(&3), Some(&4));
         };
     }
-
 }
