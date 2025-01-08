@@ -6,6 +6,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InlineAsm.h"
@@ -306,6 +307,13 @@ namespace
                       alloca.setAlignment(llvm::Align(8));
                     }
                     alloca.takeName(call);
+                    // // zero init
+                    // llvm::Type *i8_type = llvm::IntegerType::getInt8Ty(builder.getContext());
+                    // llvm::Value* v= &alloca;
+                    // Value* v2 = llvm::ConstantInt::get(i8_type, 0/*value*/, true);
+                    // uint64_t size1 = sizeInt;
+                    // MaybeAlign align =  MaybeAlign(0);
+                    // builder.CreateMemSet(v, v2, size1, align);
 
                     // find all gep, replace address space with 0
                     auto users = call->users();
@@ -725,7 +733,8 @@ namespace
       }
     }
     FunctionType *NFTy = FunctionType::get(FTy->getReturnType(), Params, FTy->isVarArg());
-
+    llvm::ValueToValueMapTy VMap;
+    Function* NF_Addr0 = CloneFunction(&F, VMap);
     // Create the new function body and insert it into the module...
     Function *NF = Function::Create(NFTy, F.getLinkage(), F.getAddressSpace());
     NF->copyAttributesFrom(&F);

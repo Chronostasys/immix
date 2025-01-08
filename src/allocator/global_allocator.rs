@@ -8,8 +8,7 @@ use parking_lot::{Mutex, RwLock};
 use threadpool::ThreadPool;
 
 use crate::{
-    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, HeaderExt,
-    NUM_LINES_PER_BLOCK,
+    bigobj::BigObj, block::Block, consts::BLOCK_SIZE, mmap::Mmap, round_n_down, HeaderExt, GC_RUNNING, GC_SWEEPING, NUM_LINES_PER_BLOCK
 };
 
 use super::{big_obj_allocator::BigObjAllocator, global_freelist::Freelist};
@@ -60,6 +59,9 @@ pub struct GlobalAllocator {
     pub(crate) finalizers: FinalizerList,
 
     free_list_mtx: RwLock<()>,
+
+    heap_size: usize,
+    total_used: AtomicUsize,
 }
 
 unsafe impl Sync for GlobalAllocator {}
@@ -112,7 +114,30 @@ impl GlobalAllocator {
             block_bytemap,
             finalizers: Mutex::new(Vec::new()),
             free_list_mtx: RwLock::new(()),
+            heap_size: 1024*1024,
+            total_used: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn add_used(&self, size: usize) {
+        self.total_used.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn end_gc(&mut self) {
+        // let offset = unsafe{(self.current.load(std::sync::atomic::Ordering::Relaxed) as * mut u8).offset_from(self.heap_start) as usize};
+        // if offset >= self.heap_size {
+        //     self.heap_size = offset;
+        // }
+        let total_used = self.total_used.load(std::sync::atomic::Ordering::Relaxed);
+        let should_expand = total_used > self.heap_size / 2;
+        // eprintln!("total used: {}, heap size: {}", total_used, self.heap_size);
+        if should_expand {
+            self.heap_size = self.heap_size * 3 / 2;
+            eprintln!("expand heap to {}", self.heap_size);
+        }
+
+
+        self.total_used.store(0, std::sync::atomic::Ordering::Relaxed);
     }
     /// 从big object mmap中分配一个大对象，大小为size
     pub fn get_big_obj(&mut self, size: usize) -> *mut BigObj {
@@ -168,6 +193,7 @@ impl GlobalAllocator {
                 }
                 self.big_obj_allocator.return_chunk(*obj);
             }
+            // big_objs.push(*obj);
             unsafe {
                 (*(*obj)).header &= !0b10;
             }
@@ -175,7 +201,7 @@ impl GlobalAllocator {
         *objs = big_objs;
     }
 
-    fn set_block_bitmap(&self, block: *mut Block, value: bool) {
+    pub(crate) fn set_block_bitmap(&self, block: *mut Block, value: bool) {
         let block_start = block as usize;
         let block_index = (block_start - self.heap_start as usize) / BLOCK_SIZE;
         unsafe {
@@ -194,22 +220,29 @@ impl GlobalAllocator {
     /// 从mmap的heap空间之中获取一个Option<* mut Block>，如果heap空间不够了，就返回None
     ///
     /// 每次分配block会让current增加一个block的大小
-    fn alloc_block<const N: usize>(&self) -> Option<[*mut Block; N]> {
+    fn alloc_block<const N: usize>(&self, can_fail: bool) -> Option<[*mut Block; N]> {
+        let current = self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8;
+
+        let heap_end = self.heap_end;
+        let end = unsafe{current.add(BLOCK_SIZE * N)};
+        if end > heap_end  {
+            return None;
+        }
+        if end> unsafe{self.heap_start.add(self.heap_size)} && can_fail {
+            return None;
+        }
         // crate::SLOW_PATH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let current = self
             .current
             .fetch_add(BLOCK_SIZE * N, std::sync::atomic::Ordering::Relaxed)
             as *mut u8;
-        let heap_end = self.heap_end;
-        if unsafe { current.add(BLOCK_SIZE * N) } > heap_end {
-            return None;
-        }
 
         self.mmap.commit(current, BLOCK_SIZE * N);
         let blocks = unsafe {
             let mut blocks = [std::ptr::null_mut(); N];
             for i in 0..N {
                 blocks[i] = current.add(i * BLOCK_SIZE) as *mut Block;
+                // eprintln!("new block: {:p}", blocks[i]);
             }
             blocks
         };
@@ -219,9 +252,8 @@ impl GlobalAllocator {
 
     pub fn should_gc(&self) -> bool {
         unsafe {
-            let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8)
-                .add(BLOCK_SIZE * 32);
-            p >= self.heap_end && self.free_blocks.len() < 32
+            let p = (self.current.load(std::sync::atomic::Ordering::Relaxed) as *mut u8);
+            p >= self.heap_start.add(self.heap_size) && self.free_blocks.len() <= 0
         }
     }
 
@@ -251,12 +283,12 @@ impl GlobalAllocator {
     /// # get_block
     ///
     /// 从free_blocks中获取一个可用的block，如果没有可用的block，就从mmap的heap空间之中获取一个新block
-    pub fn get_block(&mut self) -> *mut Block {
+    pub fn get_block(&mut self, can_fail: bool) -> *mut Block {
         let block = if let Some(block) = self.free_blocks.pop() {
             // eprintln!("get block from free list");
             block
         } else {
-            self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
+            self.alloc_block::<1>(can_fail).unwrap_or([std::ptr::null_mut()])[0]
         };
 
         if block.is_null() {
@@ -312,6 +344,7 @@ impl GlobalAllocator {
     {
         let _lock = self.free_list_mtx.write();
         for block in blocks {
+            // unsafe{assert!(!block.as_mut().unwrap_unchecked().marked)};
             self.set_block_bitmap(block, false);
             self.free_blocks.push(block);
             // self.mmap
@@ -325,7 +358,7 @@ impl GlobalAllocator {
         let block = if let Some(block) = self.free_blocks.pop() {
             block
         } else {
-            self.alloc_block::<1>().unwrap_or([std::ptr::null_mut()])[0]
+            self.alloc_block::<1>(false).unwrap_or([std::ptr::null_mut()])[0]
         };
 
         if block.is_null() {

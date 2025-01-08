@@ -139,11 +139,15 @@ pub fn print_block_time() {
     })
 }
 
-pub fn set_high_sp(sp: *mut u8) {
+pub fn set_low_sp(sp: *mut u8) {
     SPACE.with(|gc| {
         let gc = unsafe { gc.get().as_mut().unwrap() };
-        gc.set_high_sp(sp);
+        gc.set_low_sp(sp);
     })
+}
+
+pub fn current_sp() -> *mut u8 {
+    Collector::current_sp()
 }
 
 /// # gc_malloc_fast_unwind
@@ -171,24 +175,30 @@ pub fn gc_malloc_fast_unwind_ex(
     obj_type: u8,
     sp: *mut u8,
 ) -> *mut u8 {
+    let me_sp = Collector::current_sp();
     // SLOW_PATH_COUNT.fetch_add(1, Ordering::Relaxed);
     // gc_malloc_fast_unwind(size, obj_type, sp)
-    if unsafe { *space }.is_null() {
+    let mut regs = [0usize; 10];
+    let mut need_restore = false;
+    let re = if unsafe { *space }.is_null() {
         let re = SPACE.with(|gc1| {
             {
                 let space: &mut *mut *mut Collector = &mut space;
                 let gc = gc1.get();
                 unsafe { **space = gc }
                 // let regs = Collector::get_registers();
-                // unsafe{gc.as_mut().unwrap().set_registers(regs)};
+                
                 // let sp = Collector::current_sp();
+                unsafe{gc.as_mut().unwrap_unchecked().set_low_sp(me_sp);};
+                unsafe{gc.as_mut().unwrap_unchecked().store_registers()};
                 // eprintln!("space setted {:p}", gc);
                 let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
                     size,
                     ObjectType::from_int(obj_type).unwrap(),
                     sp,
                 );
-                // unsafe{gc.as_mut().unwrap().update_resgisters();};
+                regs = unsafe{gc.as_mut().unwrap_unchecked().registers()};
+                need_restore = unsafe{gc.as_mut().unwrap_unchecked().get_need_restore()};
                 re
             }
         });
@@ -196,17 +206,23 @@ pub fn gc_malloc_fast_unwind_ex(
     } else {
         let gc = unsafe { *space };
         // let regs = Collector::get_registers();
-        // unsafe{gc.as_mut().unwrap().set_registers(regs)};
         // let sp = Collector::current_sp();
+        unsafe{gc.as_mut().unwrap_unchecked().set_low_sp(me_sp);};
+        unsafe{gc.as_mut().unwrap_unchecked().store_registers()};
         // eprintln!("space get {:p}", gc);
         let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
             size,
             ObjectType::from_int(obj_type).unwrap(),
             sp,
         );
-        // unsafe{gc.as_mut().unwrap().update_resgisters();};
+        regs = unsafe{gc.as_mut().unwrap_unchecked().registers()};
+        need_restore = unsafe{gc.as_mut().unwrap_unchecked().get_need_restore()};
         re
+    };
+    if need_restore {
+        Collector::restore_callee_saved_registers(regs);
     }
+    re
 }
 
 /// # gc_malloc_no_collect
@@ -343,6 +359,10 @@ pub fn safepoint_fast_unwind(sp: *mut u8) {
     })
 }
 
+pub fn register_current_thread() -> * mut Collector {
+    SPACE.with(|gc| gc.get())
+}
+
 pub fn safepoint_fast_unwind_ex(sp: *mut u8, gc: *mut Collector) {
     unsafe { gc.as_ref().unwrap() }.safepoint_fast_unwind(sp);
 }
@@ -377,11 +397,13 @@ pub fn thread_stuck_start() {
     });
 }
 
+#[inline(always)]
 pub fn thread_stuck_start_fast(sp: *mut u8) {
     // v.0 -= 1;
+    let me_sp = Collector::current_sp();
     SPACE.with(|gc| {
         let gc = unsafe { gc.get().as_mut().unwrap() };
-
+        gc.set_low_sp(me_sp);
         // let regs = Collector::get_registers();
         // gc.set_registers(regs);
         gc.stuck_fast_unwind(sp)
@@ -423,12 +445,12 @@ pub fn remove_coro_stack(stack: *mut u8) {
 }
 
 pub unsafe fn pin(obj: *mut u8) {
-    let obj = ImmixObject::from_unaligned_ptr(obj);
+    let obj = ImmixObject::from_unaligned_ptr(obj).unwrap_unchecked();
     obj.as_mut().unwrap_unchecked().byte_header.pin();
 }
 
 pub unsafe fn is_pinned(obj: *mut u8) -> bool {
-    let obj = ImmixObject::from_unaligned_ptr(obj);
+    let obj = ImmixObject::from_unaligned_ptr(obj).unwrap_unchecked();
     obj.as_mut().unwrap_unchecked().byte_header.is_pinned()
 }
 

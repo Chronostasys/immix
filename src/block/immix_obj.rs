@@ -36,7 +36,7 @@ impl ImmixObject {
         obj
     }
 
-    pub(crate) unsafe fn from_unaligned_ptr(addr: *mut u8) -> *mut Self {
+    pub(crate) unsafe fn from_unaligned_ptr(addr: *mut u8) -> Option<*mut Self> {
         // ptr is pointed to body, so we need to get the start addr of object
         // as immix object must be aligned to 8 bytes, start from addr,
         // going 8 bytes back to get the start addr of object
@@ -51,11 +51,18 @@ impl ImmixObject {
             // if not valid, go back 8 bytes
             header_addr = header_addr.offset(-1);
             if header_addr < block_start {
-                return header_addr.add(1);
+                return None;
             }
         }
+        // check if addr in body
+        let body = (*header_addr).get_body();
+        let body_end = body.add((*header_addr).body_size());
+        if addr < body || addr >= body_end {
+            return None;
+            
+        }
         // now we get the start addr of object
-        header_addr
+        Some(header_addr)
     }
 
     pub(crate) fn from_body_ptr(addr: *mut u8) -> *mut Self {

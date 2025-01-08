@@ -11,6 +11,7 @@ use std::{
 };
 
 use crossbeam_deque::{Steal, Stealer, Worker};
+use int_enum::IntEnum;
 use libc::malloc;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
@@ -91,10 +92,10 @@ fn walk_gc_frames(sp: *mut u8, mut walker: impl FnMut(*mut u8, *mut u8, &'static
 pub struct Collector {
     thread_local_allocator: *mut ThreadLocalAllocator,
     bytes_allocated_since_last_gc: UnsafeCell<usize>,
-    registers: UnsafeCell<[usize; 32]>,
-    former_registers: [usize; 32],
+    registers: UnsafeCell<[usize; 10]>,
+    former_registers: [usize; 10],
     stuck_sp: *mut u8,
-    water_mark_sp: *mut u8,
+    low_sp: *mut u8,
     #[cfg(feature = "shadow_stack")]
     roots: rustc_hash::FxHashMap<*mut u8, ObjectType>,
     queue: Worker<SendableMarkJob>,
@@ -107,6 +108,7 @@ pub struct Collector {
     live: bool,
     stuck_stop_notify_chan: Sender<()>,
     stuck_stopped_notify_chan: (Sender<()>, Receiver<()>),
+    previous_sp: RefCell<*mut u8>,
 }
 
 struct CollectorStatus {
@@ -117,6 +119,7 @@ struct CollectorStatus {
     collecting: bool,
     total_stuck_time: Duration,
     am_i_triggered: bool,
+    need_to_restore_registers: bool,
 }
 
 static TIME_TO_SAFE_POINT_US: AtomicU64 = AtomicU64::new(0);
@@ -184,6 +187,7 @@ impl Collector {
                     last_gc_remaining: 0,
                     total_stuck_time: Duration::default(),
                     am_i_triggered: false,
+                    need_to_restore_registers:false
                 }),
                 frames_list: AtomicPtr::default(),
                 live_set: RefCell::new(FxHashMap::default()),
@@ -194,7 +198,8 @@ impl Collector {
                 registers: Default::default(),
                 former_registers: Default::default(),
                 stuck_sp: std::ptr::null_mut(),
-                water_mark_sp: std::ptr::null_mut(),
+                low_sp: std::ptr::null_mut(),
+                previous_sp: RefCell::new( std::ptr::null_mut()),
             }
         }
     }
@@ -210,8 +215,8 @@ impl Collector {
         drop(v);
     }
 
-    pub fn set_high_sp(&mut self, sp: *mut u8) {
-        self.water_mark_sp = sp;
+    pub fn set_low_sp(&mut self, sp: *mut u8) {
+        self.low_sp = sp;
     }
 
     /// # get_size
@@ -255,11 +260,11 @@ impl Collector {
         let ptr = self.alloc_no_collect(size, obj_type);
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if ptr.is_null() {
-            spin_until!(!GC_SWEEPING.load(Ordering::Acquire));
+            // spin_until!(!GC_SWEEPING.load(Ordering::Acquire));
             log::info!("gc {}: OOM, start emergency gc", self.id);
-            ENABLE_EVA.store(false, Ordering::Release);
+            // ENABLE_EVA.store(false, Ordering::Release);
             self.collect_fast_unwind(sp);
-            ENABLE_EVA.store(true, Ordering::Release);
+            // ENABLE_EVA.store(true, Ordering::Release);
             return unsafe {
                 self.thread_local_allocator
                     .as_mut()
@@ -274,15 +279,16 @@ impl Collector {
     #[inline(always)]
     fn collect_if_needed_fast_unwind(&self, sp: *mut u8) {
         if GC_RUNNING.load(Ordering::Acquire) {
+            // eprintln!("gc {}: GC is running, start gc", self.id);
             log::info!("gc {}: GC is running, start gc", self.id);
             self.collect_fast_unwind(sp);
             return;
         }
-        #[cfg(debug_assertions)]
-        if !GC_SWEEPING.load(Ordering::Acquire) {
-            self.collect_fast_unwind(sp);
-            return;
-        }
+        // #[cfg(debug_assertions)]
+        // if !GC_SWEEPING.load(Ordering::Acquire) {
+        //     self.collect_fast_unwind(sp);
+        //     return;
+        // }
 
         let mut status = self.status.borrow_mut();
         if (unsafe {
@@ -449,6 +455,17 @@ impl Collector {
     fn mark_conservative(&self, ptr: *mut u8) {
         unsafe {
             if self.thread_local_allocator.as_mut().unwrap().in_heap(ptr) {
+                let obj = ImmixObject::from_unaligned_ptr(ptr);
+                if obj.is_none() {
+                    return;
+                    
+                }
+                let obj = obj.unwrap_unchecked();
+                for i in 0..obj.as_ref().unwrap_unchecked().body_size() / 8 {
+                    let p = (obj as * mut u8).add(i * 8 + 8);
+                    self.queue
+                        .push(SendableMarkJob::Object((p, ObjectType::Pointer)));
+                }
                 // let block_p: *mut Block = Block::from_obj_ptr(ptr) as *mut _;
 
                 // let block = &mut *block_p;
@@ -478,7 +495,7 @@ impl Collector {
                 //     }
                 //     line_header.set_marked(true);
                 // }
-                unimplemented!("conservative marking is not implemented");
+                // unimplemented!("conservative marking is not implemented");
             } else if self
                 .thread_local_allocator
                 .as_mut()
@@ -496,7 +513,7 @@ impl Collector {
                     // |<------- size ------>|
                     // size % 128 == 0 always, so just scan it.
                     let mut start = (_big_obj as *mut u8).add(16);
-                    let end = start.add((*_big_obj).size - 16);
+                    let end = start.add((*_big_obj).size);
                     while start < end {
                         self.queue
                             .push(SendableMarkJob::Object((start, ObjectType::Pointer)));
@@ -530,7 +547,7 @@ impl Collector {
             .as_mut()
             .unwrap_unchecked()
             .in_heap(ptr)
-            && ptr as usize % BLOCK_SIZE >= LINE_SIZE * 3
+            && ptr as usize % BLOCK_SIZE > LINE_SIZE * 3
         {
             // IMPORTANT: when the stack marking is conservative, the uninitialized
             // stack space may contain some heap pointers that are previously
@@ -544,22 +561,23 @@ impl Collector {
             }
             let cursor = block.get_cursor();
             let is_candidate = block.is_eva_candidate();
-            let mut obj = ImmixObject::from_unaligned_ptr(ptr);
-            let mut obj_ref = obj.as_mut().unwrap_unchecked();
-            if !obj_ref.is_valid() {
+            let obj = ImmixObject::from_unaligned_ptr(ptr);
+            if obj.is_none() {
                 return;
             }
+            let mut obj = obj.unwrap_unchecked();
+            let mut obj_ref = obj.as_mut().unwrap_unchecked();
             let mut body = obj_ref.get_body();
             let body_size = obj_ref.body_size();
             let offset_from_head = ptr.offset_from(body);
             debug_assert!(offset_from_head >= 0);
-            if offset_from_head >= body_size as _ || obj_ref.size as usize > BLOCK_SIZE / 4 {
+            if obj_ref.size as usize > BLOCK_SIZE / 4 {
                 return;
             }
             debug_assert!(offset_from_head < body_size as _);
             let (mut line_header, mut header_idx) = block.get_line_header_from_addr(obj as _);
             // when ptr >= cursor and the space is not used, we should not mark it
-            if ptr >= cursor && (!line_header.get_used() || !obj_ref.byte_header.get_used()) {
+            if ptr >= cursor && (!line_header.get_used() || (cursor.align_offset(LINE_SIZE) !=0 && ptr < cursor.add(cursor.align_offset(LINE_SIZE)))) {
                 return;
             }
             // if (ptr >= cursor && !line_header.get_used()) {
@@ -631,9 +649,10 @@ impl Collector {
                         .get_forwarded());
                     new_obj.as_mut().unwrap_unchecked().mark();
                     // eprintln!("size {}", obj_line_size*LINE_SIZE);
-                    self.correct_ptr(father, offset_from_head, ptr).expect(
-                        "The thread evacuated pointer changed by another thread during evacuation.",
-                    );
+                    if let Err(e) =  self.correct_ptr(father, offset_from_head, ptr) {
+                        eprintln!("{:p} {:p}", father,e);
+                        panic!("The thread evacuated pointer changed by another thread during evacuation.");
+                    }
                     // 成功驱逐
                     obj_ref.byte_header.set_forwarded();
                     debug_assert!(obj_ref.byte_header.get_forwarded());
@@ -701,9 +720,10 @@ impl Collector {
                 }
                 (*big_obj).header.set_marked(true);
                 let obj_type = (*big_obj).header.get_obj_type();
+                let p = (big_obj as * mut u8).add(16);
                 match obj_type {
                     ObjectType::Atomic => {}
-                    _ => self.push_job(ptr, obj_type),
+                    _ => self.push_job(p, obj_type),
                     // ObjectType::Trait => self.mark_trait(ptr),
                     // ObjectType::Complex => self.mark_complex(ptr),
                     // ObjectType::Pointer => self.mark_ptr(ptr),
@@ -714,6 +734,14 @@ impl Collector {
     }
 
     fn push_job(&self, head: *mut u8, obj_type: ObjectType) {
+        // eprintln!("push job {:p} {:?}", head, obj_type.int_value());
+        // unsafe{match obj_type {
+        //     ObjectType::Atomic => {},
+        //     ObjectType::Trait => self.mark_trait(head),
+        //     ObjectType::Complex => self.mark_complex(head),
+        //     ObjectType::Pointer => self.mark_ptr(head),
+        //     ObjectType::Conservative => self.mark_conservative(head),
+        // }}
         self.queue.push(SendableMarkJob::Object((head, obj_type)))
     }
 
@@ -811,6 +839,19 @@ impl Collector {
         }
     }
 
+    fn pin_all_callee_saved_regs(&self) {
+        unsafe {
+            for r in &mut *self.registers.get() {
+                if self.thread_local_allocator.as_mut().unwrap_unchecked().in_heap((*r) as * mut _) {
+
+                    if let Some(o)= ImmixObject::from_unaligned_ptr(*r as * mut _) {
+                        o.as_mut().unwrap_unchecked().byte_header.pin();
+                    }
+                }
+            }
+        }
+    }
+
     /// # mark_fast_unwind
     ///
     ///
@@ -842,8 +883,12 @@ impl Collector {
     ///
     /// [2]:https://github.com/llvm/llvm-project/issues/49036
     pub fn mark_fast_unwind(&self, sp: *mut u8) {
+        // self.pin_all_callee_saved_regs();
+        let mut mtx = SWEEP_MUTEX.lock();
+        SWEEP_COND.wait_while(&mut mtx, |sweeping| *sweeping);
+        drop(mtx);
         // let start1 = Instant::now();
-
+        // self.pin_all_callee_saved_regs();
         let mut v = GC_COLLECTOR_COUNT.lock();
         if v.1 == 0 {
             let mutex = STUCK_MUTEX.lock();
@@ -941,12 +986,42 @@ impl Collector {
                 // println!("{:?}", &STACK_MAP.map.borrow());
                 let fl = self.frames_list.load(Ordering::SeqCst);
                 if !fl.is_null() {
-                    // self.mark_all_stucked_registers();
-                    log::trace!("gc {}: tracing stucked frames", self.id);
+                    unsafe {
+                        for r in &mut *self.registers.get() {
+                            // if self.thread_local_allocator.as_mut().unwrap_unchecked().in_heap((*r) as * mut _) {
+                            //     let o = ImmixObject::from_unaligned_ptr(*r as * mut _).as_mut().unwrap_unchecked();
+                            //     if o.is_valid() {
+                            //         o.byte_header.pin();
+                            //     }
+                            // }
+                            let p = r as * mut _ as _;
+                            self.mark_ptr(p);
+                        }
+                    }
+                    // // self.mark_all_stucked_registers();
+                    // log::trace!("gc {}: tracing stucked frames", self.id);
                     for f in unsafe { &*fl } {
                         self.queue.push(SendableMarkJob::Frame((f.0, f.1)));
                         // self.mark_frame(&(f.0 as _), &f.1);
                     }
+
+                    // unsafe{
+                    //     // let mut i = 0;
+                    //     let mut sp = self.water_mark_sp;
+                    //     while sp < self.stuck_sp{
+                    //         // eprintln!("gc {} mark sp {:p} {}", self.id,sp, i);
+                    //         self.mark_ptr(sp as *mut u8);
+                    //         sp = sp.add(8);
+                    //         // i += 1;
+                    //     }
+                    // }
+                    // unsafe{
+                    //     let mut sp = self.stuck_sp;
+                    //     while sp >= self.water_mark_sp {
+                    //         self.mark_ptr(sp as *mut u8);
+                    //         sp = sp.offset(-8);
+                    //     }
+                    // }
                     // unsafe{self.mark_current_sp_to_pl_sp(self.stuck_sp,self.water_mark_sp);}
                 } else if sp.is_null() {
                     // use backtrace.rs or stored frames
@@ -960,13 +1035,38 @@ impl Collector {
 
                     self.mark_gc_frames(&frames);
                 } else {
+                    unsafe {
+                        for r in &mut *self.registers.get() {
+                            // if self.thread_local_allocator.as_mut().unwrap_unchecked().in_heap((*r) as * mut _) {
+                            //     let o = ImmixObject::from_unaligned_ptr(*r as * mut _).as_mut().unwrap_unchecked();
+                            //     if o.is_valid() {
+                            //         o.byte_header.pin();
+                            //     }
+                            // }
+                            let p = r as * mut _ as _;
+                            self.mark_ptr(p);
+                        }
+                    }
                     // self.mark_all_stucked_registers();
                     walk_gc_frames(sp, |sp, _, f| {
                         // eprintln!("gc {} mark frame {:p} {:?}", self.id,sp, f);
                         self.queue.push(SendableMarkJob::Frame((sp as _, f)));
                         // self.mark_frame(&(sp as _), &f);
                     });
-                    // unsafe{self.mark_current_sp_to_pl_sp(sp,self.water_mark_sp);}
+
+                    // IMPORTANT: callee saved registers may
+                    // already been pushed to stack, so we should
+                    // mark the rust stack from sp to water_mark_sp
+                    unsafe{
+                        let mut sp1 = self.low_sp;
+                        // let mut i = 0;
+                        while sp1 < sp {
+                            // eprintln!("gc {} mark sp {:p} {}", self.id,sp, i);
+                            self.mark_ptr(sp1 as *mut u8);
+                            // i += 1;
+                            sp1 = sp1.add(8);
+                        }
+                    }
                 }
                 log::debug!("gc {} global roots", self.id);
                 self.mark_globals();
@@ -1006,6 +1106,15 @@ impl Collector {
                 self.id,
                 v.1
             );
+            let mut mtx = SWEEP_MUTEX.lock();
+            *mtx = true;
+            drop(mtx);
+            // unsafe {
+            //     self.thread_local_allocator
+            //         .as_mut()
+            //         .unwrap_unchecked()
+            //         .return_prev_free_blocks();
+            // }
             let g = unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap() };
 
             let mut guard = g.finalizers.lock();
@@ -1013,7 +1122,7 @@ impl Collector {
             for (i, (p, a, f)) in guard.iter_mut().enumerate() {
                 // get block of p
                 let head = unsafe {
-                    ImmixObject::from_unaligned_ptr(*p)
+                    ImmixObject::from_unaligned_ptr(*p).unwrap_unchecked()
                         .as_mut()
                         .unwrap_unchecked()
                 };
@@ -1025,7 +1134,7 @@ impl Collector {
                     }
                 }
                 let head = unsafe {
-                    ImmixObject::from_unaligned_ptr(*p)
+                    ImmixObject::from_unaligned_ptr(*p).unwrap_unchecked()
                         .as_mut()
                         .unwrap_unchecked()
                 };
@@ -1120,7 +1229,7 @@ impl Collector {
     fn mark_frame(&self, sp: &*mut libc::c_void, f: &&Function) {
         #[cfg(not(feature = "conservative_stack_scan"))]
         f.iter_roots()
-            .for_each(|offset| self.mark_stack_offset(*sp as _, offset, ObjectType::Pointer));
+            .for_each(|offset| self.mark_stack_offset(*sp as _, offset));
         #[cfg(target_arch = "aarch64")]
         let frame_size = f.frame_size;
         #[cfg(target_arch = "x86_64")]
@@ -1158,6 +1267,79 @@ impl Collector {
         }
     }
 
+    pub(crate) fn store_registers(& self) {
+        unsafe{*self.registers.get() = Self::callee_saved_registers();}
+    }
+    pub(crate) fn registers(&self) -> [usize; 10] {
+        unsafe{*self.registers.get()}
+    }
+
+    pub(crate) fn get_need_restore(&self) -> bool {
+        let res = self.status.borrow().need_to_restore_registers;
+        self.status.borrow_mut().need_to_restore_registers = false;
+        res
+    }
+
+
+    pub(crate) fn restore_callee_saved_registers(regs: [usize; 10]) {
+        unsafe {
+            std::arch::asm!(
+                "mov x19, {0}",
+                "mov x20, {1}",
+                "mov x21, {2}",
+                "mov x22, {3}",
+                "mov x23, {4}",
+                "mov x24, {5}",
+                "mov x25, {6}",
+                "mov x26, {7}",
+                "mov x27, {8}",
+                "mov x28, {9}",
+                in(reg) regs[0],
+                in(reg) regs[1],
+                in(reg) regs[2],
+                in(reg) regs[3],
+                in(reg) regs[4],
+                in(reg) regs[5],
+                in(reg) regs[6],
+                in(reg) regs[7],
+                in(reg) regs[8],
+                in(reg) regs[9],
+            );
+        }
+    }
+
+
+    // on aarch64 is r19…r28
+    pub(crate) fn callee_saved_registers() -> [usize; 10] {
+        let mut regs = [0; 10];
+        unsafe {
+            std::arch::asm!(
+                "mov {0}, x19",
+                "mov {1}, x20",
+                "mov {2}, x21",
+                "mov {3}, x22",
+                "mov {4}, x23",
+                "mov {5}, x24",
+                "mov {6}, x25",
+                "mov {7}, x26",
+                "mov {8}, x27",
+                "mov {9}, x28",
+                out(reg) regs[0],
+                out(reg) regs[1],
+                out(reg) regs[2],
+                out(reg) regs[3],
+                out(reg) regs[4],
+                out(reg) regs[5],
+                out(reg) regs[6],
+                out(reg) regs[7],
+                out(reg) regs[8],
+                out(reg) regs[9],
+            );
+        }
+        regs
+
+
+    }
     /// # sweep
     ///
     /// since we did synchronization in mark, we don't need to do synchronization again in sweep
@@ -1166,43 +1348,59 @@ impl Collector {
         let used = unsafe {
             self.thread_local_allocator
                 .as_mut()
-                .unwrap()
+                .unwrap_unchecked()
                 .sweep(self.mark_histogram)
         };
-        let previous_threshold = self.status.borrow().collect_threshold;
+        // let previous_threshold = self.status.borrow().collect_threshold;
         // let previous_remaining = self.status.borrow().last_gc_remaining;
-        let remaining = used.0;
-        let this = unsafe { *self.bytes_allocated_since_last_gc.get() };
-        if self.status.borrow().am_i_triggered
-            && this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
-        {
-            // eprintln!("gc {}: expand {} {} {}", self.id, this, previous_threshold, remaining);
-            // expand threshold
-            self.status.borrow_mut().collect_threshold = min(
-                (previous_threshold as f64 * THRESHOLD_PROPORTION) as usize,
-                unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
-            );
+        let used_bytes = used.0;
+        unsafe {
+            let ga = self.thread_local_allocator
+                .as_mut()
+                .unwrap_unchecked().global_allocator();
+            ga.add_used(used_bytes);
         }
+        
+        // let this = unsafe { *self.bytes_allocated_since_last_gc.get() };
+        // if self.status.borrow().am_i_triggered
+        //     && this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
+        // {
+        //     // eprintln!("gc {}: expand {} {} {}", self.id, this, previous_threshold, remaining);
+        //     // expand threshold
+        //     self.status.borrow_mut().collect_threshold = min(
+        //         (previous_threshold as f64 * THRESHOLD_PROPORTION) as usize,
+        //         unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
+        //     );
+        // }
         //  else if  remaining <= (previous_threshold as f64 / crate::USED_SPACE_DIVISOR as f64) as usize {
         //         // shrink threshold
         //         self.status.borrow_mut().collect_threshold =
         //             (previous_threshold as f64 * crate::SHRINK_PROPORTION) as usize;
         //     }
-        unsafe { *self.bytes_allocated_since_last_gc.get() = 0 };
-        self.status.borrow_mut().last_gc_remaining = remaining;
-        self.status.borrow_mut().am_i_triggered = false;
+        // unsafe { *self.bytes_allocated_since_last_gc.get() = 0 };
+        // // self.status.borrow_mut().last_gc_remaining = remaining;
+        // self.status.borrow_mut().am_i_triggered = false;
 
-        let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         #[cfg(feature = "gc_profile")]
         eprintln!(
             "gc {} done sweep at {:?}",
             self.id,
             GC_INIT_TIME.elapsed().as_nanos()
         );
+        let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         if v - 1 == 0 {
+            unsafe {
+                let ga = self.thread_local_allocator
+                    .as_mut()
+                    .unwrap_unchecked().global_allocator();
+                ga.end_gc();
+            }
             log::info!("gc {}: sweep done", self.id);
             // eprintln!("gc sweep end {}", self.id);
             GC_SWEEPING.store(false, Ordering::Release);
+            let mut mtx = SWEEP_MUTEX.lock();
+            *mtx = false;
+            SWEEP_COND.notify_all();
         }
         used
         // used
@@ -1276,6 +1474,7 @@ impl Collector {
         if status.collecting {
             return Default::default();
         }
+        status.need_to_restore_registers = true;
         status.collecting = true;
         drop(status);
         // evacuation pre process
@@ -1283,6 +1482,10 @@ impl Collector {
         // 他要设置每个block是否是驱逐目标
         // 如果设置的时候别的线程的mark已经开始，那么将无法保证能够纠正所有被驱逐的指针
         unsafe {
+            self
+                    .thread_local_allocator
+                    .as_mut()
+                    .unwrap().correct_cursor();
             if ENABLE_EVA.load(Ordering::SeqCst)
                 && self.thread_local_allocator.as_mut().unwrap().should_eva()
             {
@@ -1348,11 +1551,40 @@ impl Collector {
         //     self.thread_local_allocator.as_ref().unwrap().verify();
         // }
         status.collecting = false;
+        // self.correct_sp();
+        // if !sp.is_null() {
+        //     *self.previous_sp.borrow_mut() = sp;
+        // }
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         // status.total_stuck_time += start.elapsed();
         // (Default::default(), Default::default())
     }
 
+
+    fn correct_sp(&self ) {
+        if !self.frames_list.load(Ordering::SeqCst).is_null() {
+            return; // 我们在stuck thread里，不能拿当前的线程的sp去比较原线程sp
+        }
+        let prev_sp = * self.previous_sp.borrow();
+        let current_sp = Self::current_sp();
+        if !prev_sp.is_null() {
+            if current_sp > prev_sp {
+                // stack grows down, we need to zero the stack that's not used
+                unsafe {
+                    prev_sp.write_bytes(0, current_sp.offset_from(prev_sp) as usize);   
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn current_sp() -> *mut u8 {
+        let sp: *mut u8;
+        unsafe {
+            std::arch::asm!("mov {}, sp", out(reg) sp);
+        }
+        sp
+    }
     /// # stuck
     ///
     /// tell the collector that the current thread is stucked.
@@ -1377,10 +1609,13 @@ impl Collector {
     /// - `sp` - stack pointer
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
+    #[inline(always)]
     pub fn stuck_fast_unwind(&mut self, sp: *mut u8) {
         if SHOULD_EXIT.load(Ordering::Relaxed) {
             return;
         }
+        self.store_registers();
+        self.pin_all_callee_saved_regs();
         self.former_registers = unsafe { *self.registers.get() };
         self.stuck_sp = sp;
         log::info!("gc {}: stucking...", self.id);
@@ -1501,6 +1736,8 @@ static GLOBAL_MARK_FLAG: AtomicBool = AtomicBool::new(false);
 lazy_static::lazy_static! {
     static ref STUCK_COND: Arc<Condvar> = Arc::new(Condvar::new());
     static ref STUCK_MUTEX:Mutex<()> = Mutex::new(());
+    static ref SWEEP_COND: Arc<Condvar> = Arc::new(Condvar::new());
+    static ref SWEEP_MUTEX:Mutex<bool> = Mutex::new(false);
 }
 
 unsafe impl Sync for Collector {}
