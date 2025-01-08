@@ -20,12 +20,12 @@ impl DioGC {
     }
     pub unsafe fn malloc(size: u64, obj_type: u8, rsp: *mut *mut u8) -> *mut u8 {
         trace!("malloc: {} {}", size, obj_type);
-        #[cfg(any(test, debug_assertions))]
-        {
-            if !crate::GC_SWEEPING.load(std::sync::atomic::Ordering::Relaxed) {
-                crate::gc_collect_fast_unwind(rsp as _);
-            }
-        }
+        // #[cfg(any(test, debug_assertions))]
+        // {
+        //     if !crate::GC_SWEEPING.load(std::sync::atomic::Ordering::Relaxed) {
+        //         crate::gc_collect_fast_unwind(rsp as _);
+        //     }
+        // }
         let re = gc_malloc_fast_unwind(size as usize, obj_type, rsp as _);
         if re.is_null() && size != 0 {
             eprintln!("gc malloc failed! (OOM)");
@@ -168,7 +168,10 @@ pub unsafe extern "C" fn DioGC__is_pinned(p: *mut u8) -> i32 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn DioGC__malloc_no_collect(size: u64, obj_type: u8) -> *mut u8 {
-    DioGC::malloc_no_collect(size, obj_type)
+    let re = DioGC::malloc_no_collect(size, obj_type);
+
+    re.write_bytes(0, ((size+7)/8*8) as usize);
+    re
 }
 #[no_mangle]
 pub unsafe extern "C" fn DioGC__add_coro_stack(sp: *mut u8, stack: *mut u8) {
@@ -225,10 +228,6 @@ pub unsafe extern "C" fn gc_print_block_time() {
     crate::print_block_time()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn gc_set_high_sp(sp: *mut u8) {
-    crate::set_high_sp(sp);
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn start_nano() -> u64 {

@@ -106,13 +106,13 @@ impl ThreadLocalAllocator {
         }
     }
     pub fn print_stats(&self) {
-        println!("unavailable blocks: {}", self.unavailable_blocks.len());
+        println!("unavailable blocks: {:?}", self.unavailable_blocks);
         for block in &self.unavailable_blocks {
             unsafe {
                 (**block).show();
             }
         }
-        println!("recyclable blocks: {}", self.recyclable_blocks.len());
+        println!("recyclable blocks: {:?}", self.recyclable_blocks);
         for block in &self.recyclable_blocks {
             unsafe {
                 (**block).show();
@@ -147,12 +147,15 @@ impl ThreadLocalAllocator {
         }
     }
 
-    pub fn fill_available_histogram(&self, histogram: &mut FxHashMap<usize, usize>) -> usize {
+    pub(crate) fn correct_cursor(&self) {
         if let Some(b) = self.recyclable_blocks.front() {
             unsafe {
                 (**b).count_holes_and_avai_lines();
             }
         }
+    }
+
+    pub fn fill_available_histogram(&self, histogram: &mut FxHashMap<usize, usize>) -> usize {
         let mut total_available = 0;
         self.recyclable_blocks.iter().for_each(|block| unsafe {
             let (available, holes) = (**block).get_available_line_num_and_holes();
@@ -208,6 +211,7 @@ impl ThreadLocalAllocator {
             self.recyclable_blocks.is_empty()
                 && self.blocks_to_return.is_empty()
                 && (*self.global_allocator).should_gc()
+            // !self.unavailable_blocks.is_empty()
         }
     }
 
@@ -244,6 +248,7 @@ impl ThreadLocalAllocator {
             if block.is_null() {
                 return std::ptr::null_mut();
             }
+            unsafe{(*block).free = false;}
             self.recyclable_blocks.push_back(block);
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
@@ -259,7 +264,7 @@ impl ThreadLocalAllocator {
                 }
             }
         }
-        debug_assert!(!unsafe { f.as_ref().unwrap() }.is_eva_candidate());
+        debug_assert!((!unsafe { f.as_ref().unwrap() }.is_eva_candidate() || !self.collect_mode));
         let res = unsafe { (**f).alloc(size, obj_type) };
 
         match res {
@@ -304,6 +309,7 @@ impl ThreadLocalAllocator {
         if new_block.is_null() {
             return std::ptr::null_mut();
         }
+        unsafe{(*new_block).free = false;}
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
         let re = unsafe {
@@ -368,19 +374,17 @@ impl ThreadLocalAllocator {
         } else if self.collect_mode {
             unsafe { (*self.global_allocator).get_block_locked() }
         } else {
-            unsafe { (*self.global_allocator).get_block() }
+            unsafe { (*self.global_allocator).get_block(true) }
         };
 
         unsafe {
             b.as_mut().map(|b| {
                 b.reset_header();
-                b.free = false;
             })
         };
 
         b
     }
-
     /// # in_heap
     pub fn in_heap(&self, ptr: *mut u8) -> bool {
         unsafe { (*self.global_allocator).in_heap(ptr) }
@@ -389,6 +393,10 @@ impl ThreadLocalAllocator {
     /// # in_big_heap
     pub fn in_big_heap(&self, ptr: *mut u8) -> bool {
         unsafe { (*self.global_allocator).in_big_heap(ptr) }
+    }
+
+    pub fn global_allocator(&self ) ->& mut GlobalAllocator {
+        unsafe{self.global_allocator.as_mut().unwrap_unchecked()}
     }
 
     /// # sweep
@@ -472,6 +480,9 @@ impl ThreadLocalAllocator {
         free_blocks.sort_unstable();
         debug_assert!(self.blocks_to_return.is_empty());
         self.blocks_to_return = free_blocks;
+        self.eva_blocks.iter().chain(self.blocks_to_return.iter()).for_each(|b| unsafe {
+            (*b).as_mut().unwrap_unchecked().free = true;
+        });
 
         let curr = self.recyclable_blocks.front().cloned();
         if curr.is_none() {
@@ -484,11 +495,13 @@ impl ThreadLocalAllocator {
             }
             unsafe {
                 self.curr_block.as_mut().unwrap_unchecked().free = false;
+                self.curr_block.as_mut().unwrap_unchecked().reset_header();
             }
             self.recyclable_blocks.push_back(self.curr_block);
         } else {
             self.curr_block = unsafe { curr.unwrap_unchecked() };
         }
+        // self.print_stats();
 
         let used_lines = total_used * LINE_SIZE;
         (used_lines, free_lines * LINE_SIZE)

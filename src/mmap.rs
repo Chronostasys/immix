@@ -134,7 +134,7 @@ mod _unix {
                 let re = libc::madvise(
                     page as *mut _,
                     size as _,
-                    libc::MADV_WILLNEED | libc::MADV_RANDOM,
+                    libc::MADV_WILLNEED | libc::MADV_SEQUENTIAL,
                 );
                 debug_assert_eq!(re, 0);
                 re == 0

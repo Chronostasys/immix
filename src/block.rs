@@ -214,11 +214,11 @@ impl Block {
 
     pub fn show(&self) {
         println!("size: {}", self.get_size());
-        println!("first_hole_line_idx: {:?}", self.cursor);
+        println!("first_hole: {:?}", self.cursor);
         println!("marked: {}", self.marked);
         println!("hole_num: {}", self.hole_num);
         println!("available_line_num: {}", self.available_line_num);
-        println!("line_map: {:?}", self.line_map);
+        // println!("line_map: {:?}", self.line_map);
     }
 
     // pub fn get_obj_line_size(&mut self, idx: usize) -> usize {
@@ -267,12 +267,6 @@ impl Block {
         // self.eva_allocated = false;
     }
 
-    pub fn zero_init(&mut self) {
-        unsafe {
-            self.cursor.write_bytes(0, BLOCK_SIZE - LINE_SIZE * 3);
-        }
-    }
-
     pub fn get_cursor(&self) -> *mut u8 {
         self.cursor
     }
@@ -290,6 +284,7 @@ impl Block {
         let mut cursor = None;
         let mut hole_end = None;
         let mut offset = std::ptr::null_mut();
+        let prev_cursor = self.cursor;
         while idx < NUM_LINES_PER_BLOCK {
             // if !self.line_map[idx].is_pinned() {
             //     if self.line_map[idx].get_forwarded() && self.line_map[idx].get_marked() {
@@ -306,7 +301,7 @@ impl Block {
                 }
                 while line < end {
                     let obj = ImmixObject::from_ptr(line);
-                    if (*obj).is_valid() && (*obj).is_marked() {
+                    if (*obj).is_valid() && (*obj).is_marked() && (line < prev_cursor || (*obj).byte_header.get_used()) {
                         (*obj).correct_header();
                         line = line.add((*obj).size as usize);
                         offset = line;
@@ -318,7 +313,7 @@ impl Block {
                                     .get_marked()
                         )
                     } else {
-                        line.write_bytes(0, 8);
+                        // line.write_bytes(0, 8);
                         line = line.add(8);
                     }
                 }
@@ -349,9 +344,9 @@ impl Block {
                     hole_num += 1;
                     hole_flag = true;
                 }
-                let line = self.get_nth_line(idx);
-                line.write_bytes(0, LINE_SIZE);
-                self.line_map[idx] &= 0;
+                // let line = self.get_nth_line(idx);
+                // line.write_bytes(0, LINE_SIZE);
+                self.line_map[idx] = 0;
                 idx += 1;
             }
         }
@@ -496,6 +491,11 @@ impl Block {
     }
 
     pub unsafe fn bump_next_hole(&mut self) -> Option<()> {
+        // // zero the remaining space in current hole
+        // if self.hole_end > self.cursor {
+        //     // eprintln!("zeroing {}", self.hole_end as usize - self.cursor as usize);
+        //     self.cursor.write_bytes(0, self.hole_end as usize - self.cursor as usize);
+        // }
         if self.hole_end >= self.end {
             return Option::<()>::None;
         }
@@ -528,7 +528,9 @@ impl Block {
     pub fn count_holes_and_avai_lines(&mut self) {
         // count from cursor to the end
         let alined_cursor = unsafe { self.cursor.add(self.cursor.align_offset(LINE_SIZE)) };
-        self.cursor = alined_cursor;
+        
+        // unsafe{self.cursor.write_bytes(0, self.cursor.align_offset(LINE_SIZE));}
+        // self.cursor = alined_cursor;
         if alined_cursor >= self.end {
             self.hole_num = 0;
             self.available_line_num = 0;
@@ -601,7 +603,7 @@ mod tests {
     fn test_block_alloc() {
         unsafe {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
-            let block = &mut *ga.get_block();
+            let block = &mut *ga.get_block(true);
             block.reset_header();
 
             block.cursor = block.cursor.add(64);
@@ -630,7 +632,7 @@ mod tests {
     fn test_correct_header() {
         unsafe {
             let mut ga = GlobalAllocator::new(BLOCK_SIZE * 20);
-            let block = &mut *ga.get_block();
+            let block = &mut *ga.get_block(true);
             block.cursor = block.cursor.add(64);
             let l = block.get_nth_line_header(3);
             *l = 0b10;
