@@ -59,7 +59,6 @@ impl ImmixObject {
         let body_end = body.add((*header_addr).body_size());
         if addr < body || addr >= body_end {
             return None;
-            
         }
         // now we get the start addr of object
         Some(header_addr)

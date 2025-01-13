@@ -301,7 +301,10 @@ impl Block {
                 }
                 while line < end {
                     let obj = ImmixObject::from_ptr(line);
-                    if (*obj).is_valid() && (*obj).is_marked() && (line < prev_cursor || (*obj).byte_header.get_used()) {
+                    if (*obj).is_valid()
+                        && (*obj).is_marked()
+                        && (line < prev_cursor || (*obj).byte_header.get_used())
+                    {
                         (*obj).correct_header();
                         line = line.add((*obj).size as usize);
                         offset = line;
@@ -528,7 +531,7 @@ impl Block {
     pub fn count_holes_and_avai_lines(&mut self) {
         // count from cursor to the end
         let alined_cursor = unsafe { self.cursor.add(self.cursor.align_offset(LINE_SIZE)) };
-        
+
         // unsafe{self.cursor.write_bytes(0, self.cursor.align_offset(LINE_SIZE));}
         // self.cursor = alined_cursor;
         if alined_cursor >= self.end {

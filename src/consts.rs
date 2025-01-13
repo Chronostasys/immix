@@ -12,6 +12,16 @@ pub const EVA_BLOCK_PROPORTION: f64 = 0.025;
 
 pub const ALIGN: usize = 4096;
 
+#[cfg(target_arch = "aarch64")]
+pub const CALLEE_SAVED_REG_NUM: usize = 10;
+
+// The x64 ABI considers registers RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15, and XMM6-XMM15 nonvolatile
+#[cfg(target_arch = "x86_64")]
+pub const CALLEE_SAVED_REG_NUM: usize = 9;
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+compile_error!("The target architecture is not supported");
+
 /// When gc heap expand condition was met,
 /// the new heap size would be current_threshold*THRESHOLD_PROPORTION
 pub const THRESHOLD_PROPORTION: f64 = 2.0;

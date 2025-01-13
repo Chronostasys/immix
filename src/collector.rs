@@ -1,7 +1,6 @@
 #![allow(clippy::box_collection)]
 use std::{
     cell::{RefCell, UnsafeCell},
-    cmp::min,
     sync::{
         atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
@@ -11,7 +10,6 @@ use std::{
 };
 
 use crossbeam_deque::{Steal, Stealer, Worker};
-use int_enum::IntEnum;
 use libc::malloc;
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
@@ -25,10 +23,10 @@ use crate::{
     block::{Block, LineHeaderExt, ObjectType},
     gc_is_auto_collect_enabled,
     immix_obj::ImmixObject,
-    spin_until, Function, HeaderExt, SendableMarkJob, BLOCK_SIZE, ENABLE_EVA, FREE_SPACE_DIVISOR,
+    spin_until, Function, HeaderExt, SendableMarkJob, BLOCK_SIZE, CALLEE_SAVED_REG_NUM, ENABLE_EVA,
     GC_COLLECTOR_COUNT, GC_ID, GC_MARKING, GC_MARK_COND, GC_RUNNING, GC_STW_COUNT, GC_SWEEPING,
     GC_SWEEPPING_NUM, GLOBAL_ALLOCATOR, LINE_SIZE, NUM_LINES_PER_BLOCK, SHOULD_EXIT,
-    THRESHOLD_PROPORTION, USE_SHADOW_STACK,
+    USE_SHADOW_STACK,
 };
 
 pub static SLOW_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -91,9 +89,8 @@ fn walk_gc_frames(sp: *mut u8, mut walker: impl FnMut(*mut u8, *mut u8, &'static
 #[repr(C)]
 pub struct Collector {
     thread_local_allocator: *mut ThreadLocalAllocator,
-    bytes_allocated_since_last_gc: UnsafeCell<usize>,
-    registers: UnsafeCell<[usize; 10]>,
-    former_registers: [usize; 10],
+    registers: UnsafeCell<[usize; CALLEE_SAVED_REG_NUM]>,
+    former_registers: [usize; CALLEE_SAVED_REG_NUM],
     stuck_sp: *mut u8,
     low_sp: *mut u8,
     #[cfg(feature = "shadow_stack")]
@@ -112,10 +109,6 @@ pub struct Collector {
 }
 
 struct CollectorStatus {
-    /// in bytes
-    collect_threshold: usize,
-    /// in bytes
-    last_gc_remaining: usize,
     collecting: bool,
     total_stuck_time: Duration,
     am_i_triggered: bool,
@@ -175,19 +168,16 @@ impl Collector {
 
             Self {
                 thread_local_allocator: mem,
-                bytes_allocated_since_last_gc: UnsafeCell::new(0),
                 #[cfg(feature = "shadow_stack")]
                 roots: rustc_hash::FxHashMap::default(),
                 id,
                 mark_histogram: memvecmap,
                 queue: worker,
                 status: RefCell::new(CollectorStatus {
-                    collect_threshold: 1024 * 1024,
                     collecting: false,
-                    last_gc_remaining: 0,
                     total_stuck_time: Duration::default(),
                     am_i_triggered: false,
-                    need_to_restore_registers:false
+                    need_to_restore_registers: false,
                 }),
                 frames_list: AtomicPtr::default(),
                 live_set: RefCell::new(FxHashMap::default()),
@@ -199,7 +189,7 @@ impl Collector {
                 former_registers: Default::default(),
                 stuck_sp: std::ptr::null_mut(),
                 low_sp: std::ptr::null_mut(),
-                previous_sp: RefCell::new( std::ptr::null_mut()),
+                previous_sp: RefCell::new(std::ptr::null_mut()),
             }
         }
     }
@@ -332,9 +322,6 @@ impl Collector {
         }
         log::info!("gc {}: alloc {} bytes", self.id, size);
         unsafe {
-            // let mut status = self.status.borrow_mut();
-            *self.bytes_allocated_since_last_gc.get() += ((size - 1) / LINE_SIZE + 1) * LINE_SIZE;
-            // drop(status);
             let ptr = self
                 .thread_local_allocator
                 .as_mut()
@@ -458,11 +445,10 @@ impl Collector {
                 let obj = ImmixObject::from_unaligned_ptr(ptr);
                 if obj.is_none() {
                     return;
-                    
                 }
                 let obj = obj.unwrap_unchecked();
                 for i in 0..obj.as_ref().unwrap_unchecked().body_size() / 8 {
-                    let p = (obj as * mut u8).add(i * 8 + 8);
+                    let p = (obj as *mut u8).add(i * 8 + 8);
                     self.queue
                         .push(SendableMarkJob::Object((p, ObjectType::Pointer)));
                 }
@@ -577,7 +563,11 @@ impl Collector {
             debug_assert!(offset_from_head < body_size as _);
             let (mut line_header, mut header_idx) = block.get_line_header_from_addr(obj as _);
             // when ptr >= cursor and the space is not used, we should not mark it
-            if ptr >= cursor && (!line_header.get_used() || (cursor.align_offset(LINE_SIZE) !=0 && ptr < cursor.add(cursor.align_offset(LINE_SIZE)))) {
+            if ptr >= cursor
+                && (!line_header.get_used()
+                    || (cursor.align_offset(LINE_SIZE) != 0
+                        && ptr < cursor.add(cursor.align_offset(LINE_SIZE))))
+            {
                 return;
             }
             // if (ptr >= cursor && !line_header.get_used()) {
@@ -649,8 +639,8 @@ impl Collector {
                         .get_forwarded());
                     new_obj.as_mut().unwrap_unchecked().mark();
                     // eprintln!("size {}", obj_line_size*LINE_SIZE);
-                    if let Err(e) =  self.correct_ptr(father, offset_from_head, ptr) {
-                        eprintln!("{:p} {:p}", father,e);
+                    if let Err(e) = self.correct_ptr(father, offset_from_head, ptr) {
+                        eprintln!("{:p} {:p}", father, e);
                         panic!("The thread evacuated pointer changed by another thread during evacuation.");
                     }
                     // 成功驱逐
@@ -720,7 +710,7 @@ impl Collector {
                 }
                 (*big_obj).header.set_marked(true);
                 let obj_type = (*big_obj).header.get_obj_type();
-                let p = (big_obj as * mut u8).add(16);
+                let p = (big_obj as *mut u8).add(16);
                 match obj_type {
                     ObjectType::Atomic => {}
                     _ => self.push_job(p, obj_type),
@@ -842,9 +832,13 @@ impl Collector {
     fn pin_all_callee_saved_regs(&self) {
         unsafe {
             for r in &mut *self.registers.get() {
-                if self.thread_local_allocator.as_mut().unwrap_unchecked().in_heap((*r) as * mut _) {
-
-                    if let Some(o)= ImmixObject::from_unaligned_ptr(*r as * mut _) {
+                if self
+                    .thread_local_allocator
+                    .as_mut()
+                    .unwrap_unchecked()
+                    .in_heap((*r) as *mut _)
+                {
+                    if let Some(o) = ImmixObject::from_unaligned_ptr(*r as *mut _) {
                         o.as_mut().unwrap_unchecked().byte_header.pin();
                     }
                 }
@@ -994,7 +988,7 @@ impl Collector {
                             //         o.byte_header.pin();
                             //     }
                             // }
-                            let p = r as * mut _ as _;
+                            let p = r as *mut _ as _;
                             self.mark_ptr(p);
                         }
                     }
@@ -1043,7 +1037,7 @@ impl Collector {
                             //         o.byte_header.pin();
                             //     }
                             // }
-                            let p = r as * mut _ as _;
+                            let p = r as *mut _ as _;
                             self.mark_ptr(p);
                         }
                     }
@@ -1057,12 +1051,12 @@ impl Collector {
                     // IMPORTANT: callee saved registers may
                     // already been pushed to stack, so we should
                     // mark the rust stack from sp to water_mark_sp
-                    unsafe{
+                    unsafe {
                         let mut sp1 = self.low_sp;
                         // let mut i = 0;
                         while sp1 < sp {
                             // eprintln!("gc {} mark sp {:p} {}", self.id,sp, i);
-                            self.mark_ptr(sp1 as *mut u8);
+                            self.mark_ptr(sp1);
                             // i += 1;
                             sp1 = sp1.add(8);
                         }
@@ -1122,7 +1116,8 @@ impl Collector {
             for (i, (p, a, f)) in guard.iter_mut().enumerate() {
                 // get block of p
                 let head = unsafe {
-                    ImmixObject::from_unaligned_ptr(*p).unwrap_unchecked()
+                    ImmixObject::from_unaligned_ptr(*p)
+                        .unwrap_unchecked()
                         .as_mut()
                         .unwrap_unchecked()
                 };
@@ -1134,7 +1129,8 @@ impl Collector {
                     }
                 }
                 let head = unsafe {
-                    ImmixObject::from_unaligned_ptr(*p).unwrap_unchecked()
+                    ImmixObject::from_unaligned_ptr(*p)
+                        .unwrap_unchecked()
                         .as_mut()
                         .unwrap_unchecked()
                 };
@@ -1267,11 +1263,14 @@ impl Collector {
         }
     }
 
-    pub(crate) fn store_registers(& self) {
-        unsafe{*self.registers.get() = Self::callee_saved_registers();}
+    pub(crate) fn store_registers(&mut self) {
+        unsafe {
+            *self.registers.get() = Self::callee_saved_registers();
+        }
+        self.former_registers = self.registers();
     }
-    pub(crate) fn registers(&self) -> [usize; 10] {
-        unsafe{*self.registers.get()}
+    pub(crate) fn registers(&self) -> [usize; CALLEE_SAVED_REG_NUM] {
+        unsafe { *self.registers.get() }
     }
 
     pub(crate) fn get_need_restore(&self) -> bool {
@@ -1280,39 +1279,53 @@ impl Collector {
         res
     }
 
-
-    pub(crate) fn restore_callee_saved_registers(regs: [usize; 10]) {
-        unsafe {
-            std::arch::asm!(
-                "mov x19, {0}",
-                "mov x20, {1}",
-                "mov x21, {2}",
-                "mov x22, {3}",
-                "mov x23, {4}",
-                "mov x24, {5}",
-                "mov x25, {6}",
-                "mov x26, {7}",
-                "mov x27, {8}",
-                "mov x28, {9}",
-                in(reg) regs[0],
-                in(reg) regs[1],
-                in(reg) regs[2],
-                in(reg) regs[3],
-                in(reg) regs[4],
-                in(reg) regs[5],
-                in(reg) regs[6],
-                in(reg) regs[7],
-                in(reg) regs[8],
-                in(reg) regs[9],
-            );
+    pub(crate) fn restore_callee_saved_registers(&self) {
+        use std::arch::asm;
+        if self.get_need_restore() {
+            let reg = self.registers();
+            unsafe {
+                // compare registers with former registers, if changed, restore
+                for i in 0..CALLEE_SAVED_REG_NUM {
+                    if reg[i] != self.former_registers[i] {
+                        #[cfg(target_arch = "aarch64")]
+                        match i {
+                            0 => asm!("mov x19, {0}", in(reg) reg[i]),
+                            1 => asm!("mov x20, {0}", in(reg) reg[i]),
+                            2 => asm!("mov x21, {0}", in(reg) reg[i]),
+                            3 => asm!("mov x22, {0}", in(reg) reg[i]),
+                            4 => asm!("mov x23, {0}", in(reg) reg[i]),
+                            5 => asm!("mov x24, {0}", in(reg) reg[i]),
+                            6 => asm!("mov x25, {0}", in(reg) reg[i]),
+                            7 => asm!("mov x26, {0}", in(reg) reg[i]),
+                            8 => asm!("mov x27, {0}", in(reg) reg[i]),
+                            9 => asm!("mov x28, {0}", in(reg) reg[i]),
+                            _ => unreachable!(),
+                        }
+                        #[cfg(target_arch = "x86_64")]
+                        match i {
+                            0 => asm!("mov {0}, rbx", in(reg) reg),
+                            1 => asm!("mov {0}, rbp", in(reg) reg),
+                            2 => asm!("mov {0}, r12", in(reg) reg),
+                            3 => asm!("mov {0}, r13", in(reg) reg),
+                            4 => asm!("mov {0}, r14", in(reg) reg),
+                            5 => asm!("mov {0}, r15", in(reg) reg),
+                            6 => asm!("mov {0}, rsi", in(reg) reg),
+                            7 => asm!("mov {0}, rdi", in(reg) reg),
+                            8 => asm!("mov {0}, rsp", in(reg) reg),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+            }
         }
     }
 
-
     // on aarch64 is r19…r28
-    pub(crate) fn callee_saved_registers() -> [usize; 10] {
-        let mut regs = [0; 10];
+    pub(crate) fn callee_saved_registers() -> [usize; CALLEE_SAVED_REG_NUM] {
+        let mut regs = [0; CALLEE_SAVED_REG_NUM];
         unsafe {
+            // https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst#611general-purpose-registers
+            #[cfg(target_arch = "aarch64")]
             std::arch::asm!(
                 "mov {0}, x19",
                 "mov {1}, x20",
@@ -1335,10 +1348,31 @@ impl Collector {
                 out(reg) regs[8],
                 out(reg) regs[9],
             );
+            // The x64 ABI considers registers RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15, and XMM6-XMM15 nonvolatile
+            // see https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#callercallee-saved-registers
+            #[cfg(target_arch = "x86_64")]
+            std::arch::asm!(
+                "mov rbx, {0}",
+                "mov rbp, {1}",
+                "mov r12, {2}",
+                "mov r13, {3}",
+                "mov r14, {4}",
+                "mov r15, {5}",
+                "mov rsi, {6}",
+                "mov rdi, {7}",
+                "mov rsp, {8}",
+                out(reg) regs[0],
+                out(reg) regs[1],
+                out(reg) regs[2],
+                out(reg) regs[3],
+                out(reg) regs[4],
+                out(reg) regs[5],
+                out(reg) regs[6],
+                out(reg) regs[7],
+                out(reg) regs[8],
+            );
         }
         regs
-
-
     }
     /// # sweep
     ///
@@ -1355,31 +1389,13 @@ impl Collector {
         // let previous_remaining = self.status.borrow().last_gc_remaining;
         let used_bytes = used.0;
         unsafe {
-            let ga = self.thread_local_allocator
+            let ga = self
+                .thread_local_allocator
                 .as_mut()
-                .unwrap_unchecked().global_allocator();
+                .unwrap_unchecked()
+                .global_allocator();
             ga.add_used(used_bytes);
         }
-        
-        // let this = unsafe { *self.bytes_allocated_since_last_gc.get() };
-        // if self.status.borrow().am_i_triggered
-        //     && this <= (previous_threshold as f64 / FREE_SPACE_DIVISOR as f64) as usize
-        // {
-        //     // eprintln!("gc {}: expand {} {} {}", self.id, this, previous_threshold, remaining);
-        //     // expand threshold
-        //     self.status.borrow_mut().collect_threshold = min(
-        //         (previous_threshold as f64 * THRESHOLD_PROPORTION) as usize,
-        //         unsafe { GLOBAL_ALLOCATOR.0.as_mut().unwrap().size() },
-        //     );
-        // }
-        //  else if  remaining <= (previous_threshold as f64 / crate::USED_SPACE_DIVISOR as f64) as usize {
-        //         // shrink threshold
-        //         self.status.borrow_mut().collect_threshold =
-        //             (previous_threshold as f64 * crate::SHRINK_PROPORTION) as usize;
-        //     }
-        // unsafe { *self.bytes_allocated_since_last_gc.get() = 0 };
-        // // self.status.borrow_mut().last_gc_remaining = remaining;
-        // self.status.borrow_mut().am_i_triggered = false;
 
         #[cfg(feature = "gc_profile")]
         eprintln!(
@@ -1390,9 +1406,11 @@ impl Collector {
         let v = GC_SWEEPPING_NUM.fetch_sub(1, Ordering::AcqRel);
         if v - 1 == 0 {
             unsafe {
-                let ga = self.thread_local_allocator
+                let ga = self
+                    .thread_local_allocator
                     .as_mut()
-                    .unwrap_unchecked().global_allocator();
+                    .unwrap_unchecked()
+                    .global_allocator();
                 ga.end_gc();
             }
             log::info!("gc {}: sweep done", self.id);
@@ -1482,10 +1500,10 @@ impl Collector {
         // 他要设置每个block是否是驱逐目标
         // 如果设置的时候别的线程的mark已经开始，那么将无法保证能够纠正所有被驱逐的指针
         unsafe {
-            self
-                    .thread_local_allocator
-                    .as_mut()
-                    .unwrap().correct_cursor();
+            self.thread_local_allocator
+                .as_mut()
+                .unwrap()
+                .correct_cursor();
             if ENABLE_EVA.load(Ordering::SeqCst)
                 && self.thread_local_allocator.as_mut().unwrap().should_eva()
             {
@@ -1560,28 +1578,14 @@ impl Collector {
         // (Default::default(), Default::default())
     }
 
-
-    fn correct_sp(&self ) {
-        if !self.frames_list.load(Ordering::SeqCst).is_null() {
-            return; // 我们在stuck thread里，不能拿当前的线程的sp去比较原线程sp
-        }
-        let prev_sp = * self.previous_sp.borrow();
-        let current_sp = Self::current_sp();
-        if !prev_sp.is_null() {
-            if current_sp > prev_sp {
-                // stack grows down, we need to zero the stack that's not used
-                unsafe {
-                    prev_sp.write_bytes(0, current_sp.offset_from(prev_sp) as usize);   
-                }
-            }
-        }
-    }
-
     #[inline(always)]
     pub(crate) fn current_sp() -> *mut u8 {
         let sp: *mut u8;
         unsafe {
+            #[cfg(target_arch = "aarch64")]
             std::arch::asm!("mov {}, sp", out(reg) sp);
+            #[cfg(target_arch = "x86_64")]
+            std::arch::asm!("mov rsp, {}", out(reg) sp);
         }
         sp
     }
@@ -1616,7 +1620,6 @@ impl Collector {
         }
         self.store_registers();
         self.pin_all_callee_saved_regs();
-        self.former_registers = unsafe { *self.registers.get() };
         self.stuck_sp = sp;
         log::info!("gc {}: stucking...", self.id);
         let frames = self.get_frames(sp);

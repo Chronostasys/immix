@@ -178,8 +178,6 @@ pub fn gc_malloc_fast_unwind_ex(
     let me_sp = Collector::current_sp();
     // SLOW_PATH_COUNT.fetch_add(1, Ordering::Relaxed);
     // gc_malloc_fast_unwind(size, obj_type, sp)
-    let mut regs = [0usize; 10];
-    let mut need_restore = false;
     let re = if unsafe { *space }.is_null() {
         let re = SPACE.with(|gc1| {
             {
@@ -187,18 +185,18 @@ pub fn gc_malloc_fast_unwind_ex(
                 let gc = gc1.get();
                 unsafe { **space = gc }
                 // let regs = Collector::get_registers();
-                
+
                 // let sp = Collector::current_sp();
-                unsafe{gc.as_mut().unwrap_unchecked().set_low_sp(me_sp);};
-                unsafe{gc.as_mut().unwrap_unchecked().store_registers()};
+                unsafe {
+                    gc.as_mut().unwrap_unchecked().set_low_sp(me_sp);
+                };
+                unsafe { gc.as_mut().unwrap_unchecked().store_registers() };
                 // eprintln!("space setted {:p}", gc);
                 let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
                     size,
                     ObjectType::from_int(obj_type).unwrap(),
                     sp,
                 );
-                regs = unsafe{gc.as_mut().unwrap_unchecked().registers()};
-                need_restore = unsafe{gc.as_mut().unwrap_unchecked().get_need_restore()};
                 re
             }
         });
@@ -207,20 +205,20 @@ pub fn gc_malloc_fast_unwind_ex(
         let gc = unsafe { *space };
         // let regs = Collector::get_registers();
         // let sp = Collector::current_sp();
-        unsafe{gc.as_mut().unwrap_unchecked().set_low_sp(me_sp);};
-        unsafe{gc.as_mut().unwrap_unchecked().store_registers()};
+        unsafe {
+            gc.as_mut().unwrap_unchecked().set_low_sp(me_sp);
+        };
+        unsafe { gc.as_mut().unwrap_unchecked().store_registers() };
         // eprintln!("space get {:p}", gc);
         let re = unsafe { gc.as_ref().unwrap_unchecked() }.alloc_fast_unwind(
             size,
             ObjectType::from_int(obj_type).unwrap(),
             sp,
         );
-        regs = unsafe{gc.as_mut().unwrap_unchecked().registers()};
-        need_restore = unsafe{gc.as_mut().unwrap_unchecked().get_need_restore()};
         re
     };
-    if need_restore {
-        Collector::restore_callee_saved_registers(regs);
+    unsafe {
+        (**space).restore_callee_saved_registers();
     }
     re
 }
@@ -359,7 +357,7 @@ pub fn safepoint_fast_unwind(sp: *mut u8) {
     })
 }
 
-pub fn register_current_thread() -> * mut Collector {
+pub fn register_current_thread() -> *mut Collector {
     SPACE.with(|gc| gc.get())
 }
 
