@@ -248,7 +248,9 @@ impl ThreadLocalAllocator {
             if block.is_null() {
                 return std::ptr::null_mut();
             }
-            unsafe{(*block).free = false;}
+            unsafe {
+                (*block).free = false;
+            }
             self.recyclable_blocks.push_back(block);
         }
         let mut f = unsafe { self.recyclable_blocks.front().unwrap_unchecked() };
@@ -309,7 +311,9 @@ impl ThreadLocalAllocator {
         if new_block.is_null() {
             return std::ptr::null_mut();
         }
-        unsafe{(*new_block).free = false;}
+        unsafe {
+            (*new_block).free = false;
+        }
         debug_assert!(!unsafe { new_block.as_ref().unwrap() }.is_eva_candidate());
         // alloc
         let re = unsafe {
@@ -395,8 +399,8 @@ impl ThreadLocalAllocator {
         unsafe { (*self.global_allocator).in_big_heap(ptr) }
     }
 
-    pub fn global_allocator(&self ) ->& mut GlobalAllocator {
-        unsafe{self.global_allocator.as_mut().unwrap_unchecked()}
+    pub fn global_allocator(&mut self) -> &mut GlobalAllocator {
+        unsafe { self.global_allocator.as_mut().unwrap_unchecked() }
     }
 
     /// # sweep
@@ -480,9 +484,12 @@ impl ThreadLocalAllocator {
         free_blocks.sort_unstable();
         debug_assert!(self.blocks_to_return.is_empty());
         self.blocks_to_return = free_blocks;
-        self.eva_blocks.iter().chain(self.blocks_to_return.iter()).for_each(|b| unsafe {
-            (*b).as_mut().unwrap_unchecked().free = true;
-        });
+        self.eva_blocks
+            .iter()
+            .chain(self.blocks_to_return.iter())
+            .for_each(|b| unsafe {
+                (*b).as_mut().unwrap_unchecked().free = true;
+            });
 
         let curr = self.recyclable_blocks.front().cloned();
         if curr.is_none() {

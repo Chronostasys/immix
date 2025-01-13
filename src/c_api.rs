@@ -170,7 +170,7 @@ pub unsafe extern "C" fn DioGC__is_pinned(p: *mut u8) -> i32 {
 pub unsafe extern "C" fn DioGC__malloc_no_collect(size: u64, obj_type: u8) -> *mut u8 {
     let re = DioGC::malloc_no_collect(size, obj_type);
 
-    re.write_bytes(0, ((size+7)/8*8) as usize);
+    re.write_bytes(0, ((size + 7) / 8 * 8) as usize);
     re
 }
 #[no_mangle]
@@ -227,7 +227,6 @@ pub unsafe extern "C" fn gc_exit_block() {
 pub unsafe extern "C" fn gc_print_block_time() {
     crate::print_block_time()
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn start_nano() -> u64 {
