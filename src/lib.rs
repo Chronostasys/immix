@@ -159,13 +159,24 @@ pub fn current_sp() -> *mut u8 {
 /// backtrace-rs to walk the stack.
 ///
 /// For more information, see [mark_fast_unwind](crate::collector::Collector::mark_fast_unwind)
+#[inline(always)]
 pub fn gc_malloc_fast_unwind(size: usize, obj_type: u8, sp: *mut u8) -> *mut u8 {
-    SPACE.with(|gc| {
+    let me_sp = Collector::current_sp();
+    let (p, gc) = SPACE.with(|gc| {
         // println!("start malloc");
-        let gc = unsafe { gc.get().as_ref().unwrap() };
+        unsafe {
+            gc.get().as_mut().unwrap_unchecked().set_low_sp(me_sp);
+        };
+        let gc = unsafe { gc.get().as_mut().unwrap_unchecked() };
         // println!("malloc");
-        gc.alloc_fast_unwind(size, ObjectType::from_int(obj_type).unwrap(), sp)
-    })
+        (
+            gc.alloc_fast_unwind(size, ObjectType::from_int(obj_type).unwrap(), sp),
+            gc,
+        )
+    });
+    gc.set_low_sp(me_sp);
+
+    p
 }
 
 #[inline(always)]
