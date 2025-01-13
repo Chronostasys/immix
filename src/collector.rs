@@ -1303,15 +1303,15 @@ impl Collector {
                         }
                         #[cfg(target_arch = "x86_64")]
                         match i {
-                            0 => asm!("mov {0}, rbx", in(reg) reg),
-                            1 => asm!("mov {0}, rbp", in(reg) reg),
-                            2 => asm!("mov {0}, r12", in(reg) reg),
-                            3 => asm!("mov {0}, r13", in(reg) reg),
-                            4 => asm!("mov {0}, r14", in(reg) reg),
-                            5 => asm!("mov {0}, r15", in(reg) reg),
-                            6 => asm!("mov {0}, rsi", in(reg) reg),
-                            7 => asm!("mov {0}, rdi", in(reg) reg),
-                            8 => asm!("mov {0}, rsp", in(reg) reg),
+                            0 => asm!("mov {0}, rbx", in(reg) reg[i]),
+                            1 => asm!("mov {0}, rbp", in(reg) reg[i]),
+                            2 => asm!("mov {0}, r12", in(reg) reg[i]),
+                            3 => asm!("mov {0}, r13", in(reg) reg[i]),
+                            4 => asm!("mov {0}, r14", in(reg) reg[i]),
+                            5 => asm!("mov {0}, r15", in(reg) reg[i]),
+                            6 => asm!("mov {0}, rsi", in(reg) reg[i]),
+                            7 => asm!("mov {0}, rdi", in(reg) reg[i]),
+                            8 => asm!("mov {0}, rsp", in(reg) reg[i]),
                             _ => unreachable!(),
                         }
                     }
