@@ -876,7 +876,7 @@ impl Collector {
     ///
     /// [2]:https://github.com/llvm/llvm-project/issues/49036
     pub fn mark_fast_unwind(&self, sp: *mut u8) {
-        // self.pin_all_callee_saved_regs();
+        self.pin_all_callee_saved_regs();
         let mut mtx = SWEEP_MUTEX.lock();
         SWEEP_COND.wait_while(&mut mtx, |sweeping| *sweeping);
         drop(mtx);
