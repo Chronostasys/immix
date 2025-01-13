@@ -244,6 +244,10 @@ impl Collector {
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
         // let start = Instant::now();
+        #[cfg(debug_assertions)]
+        if !GC_SWEEPING.load(Ordering::Acquire) {
+            self.collect_fast_unwind(sp);
+        }
         if gc_is_auto_collect_enabled() {
             self.collect_if_needed_fast_unwind(sp);
         }
@@ -274,11 +278,6 @@ impl Collector {
             self.collect_fast_unwind(sp);
             return;
         }
-        // #[cfg(debug_assertions)]
-        // if !GC_SWEEPING.load(Ordering::Acquire) {
-        //     self.collect_fast_unwind(sp);
-        //     return;
-        // }
 
         let mut status = self.status.borrow_mut();
         if (unsafe {
@@ -1303,15 +1302,15 @@ impl Collector {
                         }
                         #[cfg(target_arch = "x86_64")]
                         match i {
-                            0 => asm!("mov {0}, rbx", in(reg) reg[i]),
-                            1 => asm!("mov {0}, rbp", in(reg) reg[i]),
-                            2 => asm!("mov {0}, r12", in(reg) reg[i]),
-                            3 => asm!("mov {0}, r13", in(reg) reg[i]),
-                            4 => asm!("mov {0}, r14", in(reg) reg[i]),
-                            5 => asm!("mov {0}, r15", in(reg) reg[i]),
-                            6 => asm!("mov {0}, rsi", in(reg) reg[i]),
-                            7 => asm!("mov {0}, rdi", in(reg) reg[i]),
-                            8 => asm!("mov {0}, rsp", in(reg) reg[i]),
+                            0 => asm!("mov rbx, {0}", in(reg) reg[i]),
+                            1 => asm!("mov rbp, {0}", in(reg) reg[i]),
+                            2 => asm!("mov r12, {0}", in(reg) reg[i]),
+                            3 => asm!("mov r13, {0}", in(reg) reg[i]),
+                            4 => asm!("mov r14, {0}", in(reg) reg[i]),
+                            5 => asm!("mov r15, {0}", in(reg) reg[i]),
+                            6 => asm!("mov rsi, {0}", in(reg) reg[i]),
+                            7 => asm!("mov rdi, {0}", in(reg) reg[i]),
+                            8 => asm!("mov rsp, {0}", in(reg) reg[i]),
                             _ => unreachable!(),
                         }
                     }
@@ -1352,15 +1351,15 @@ impl Collector {
             // see https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#callercallee-saved-registers
             #[cfg(target_arch = "x86_64")]
             std::arch::asm!(
-                "mov rbx, {0}",
-                "mov rbp, {1}",
-                "mov r12, {2}",
-                "mov r13, {3}",
-                "mov r14, {4}",
-                "mov r15, {5}",
-                "mov rsi, {6}",
-                "mov rdi, {7}",
-                "mov rsp, {8}",
+                "mov {0}, rbx",
+                "mov {1}, rbp",
+                "mov {2}, r12",
+                "mov {3}, r13",
+                "mov {4}, r14",
+                "mov {5}, r15",
+                "mov {6}, rsi",
+                "mov {7}, rdi",
+                "mov {8}, rsp",
                 out(reg) regs[0],
                 out(reg) regs[1],
                 out(reg) regs[2],
@@ -1585,7 +1584,7 @@ impl Collector {
             #[cfg(target_arch = "aarch64")]
             std::arch::asm!("mov {}, sp", out(reg) sp);
             #[cfg(target_arch = "x86_64")]
-            std::arch::asm!("mov rsp, {}", out(reg) sp);
+            std::arch::asm!("mov {}, rsp", out(reg) sp);
         }
         sp
     }
