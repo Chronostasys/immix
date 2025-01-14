@@ -2,7 +2,7 @@
 //!
 //! This module contains the thread-local allocator, which is associated with each thread.
 //!
-//! Thread-local allocator get empty blocks from global allocator, and allocate objects from these blocks.
+//! Thread-local allocator get empty blocks from global allocator, and allocate objects using these blocks.
 //!
 //! When a thread-local allocator is dropped, it will return all blocks to global allocator.
 
@@ -88,10 +88,6 @@ impl ThreadLocalAllocator {
             blocks_to_return: Vec::new(),
         }
     }
-
-    // pub fn has_emergency(&self) -> bool {
-    //     unsafe{(*self.global_allocator).out_of_space() && self.recyclable_blocks.len() == 0 }
-    // }
 
     pub fn set_collect_mode(&mut self, collect_mode: bool) {
         self.collect_mode = collect_mode;
@@ -427,12 +423,6 @@ impl ThreadLocalAllocator {
                     free_lines += delta_f;
                     let (line, _) = (*block).get_available_line_num_and_holes();
                     if line > 0 {
-                        // debug_assert!(
-                        //     (*block).find_first_hole().is_some(),
-                        //     "line {}, hole {}",
-                        //     line,
-                        //     hole
-                        // );
                         recyclable_blocks.push_back(block);
                     } else {
                         unavailable_blocks.push(block);

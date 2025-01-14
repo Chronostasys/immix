@@ -135,7 +135,6 @@ impl GlobalAllocator {
         // eprintln!("total used: {}, heap size: {}", total_used, self.heap_size);
         if should_expand {
             self.heap_size = self.heap_size * 3 / 2;
-            eprintln!("expand heap to {}", self.heap_size);
         }
 
         self.total_used
@@ -298,40 +297,10 @@ impl GlobalAllocator {
             return block;
         }
         self.set_block_bitmap(block, true);
-        // let now = std::time::Instant::now();
-        // // 距离上次alloc时间超过1秒，检查是否需要把free_blocks中的block都dont need
-        // if now.duration_since(self.last_get_block_time).as_millis() > ROUND_MIN_TIME_MILLIS {
-        //     self.last_get_block_time = now;
-        //     if self.mem_usage_flag > 0 {
-        //         self.round += 1;
-        //     } else if self.mem_usage_flag <= 0 {
-        //         self.round -= 1;
-        //     }
-        //     self.mem_usage_flag = 0;
-        //     if self.round <= -ROUND_THRESHOLD {
-        //         // 符合条件，进行dontneed
-        //         self.round = 0;
-        //         // println!("trigger dont need");
-        //         self.free_blocks
-        //             .iter_mut()
-        //             .filter(|(_, free)| !*free)
-        //             .for_each(|(block, freed)| {
-        //                 if !*freed {
-        //                     self.mmap.dontneed(*block as *mut u8, BLOCK_SIZE);
-        //                     *freed = true;
-        //                 }
-        //             });
-        //     } else if self.round >= ROUND_THRESHOLD {
-        //         self.round = 0;
-        //     }
-        // }
-        // drop(lock);
         #[cfg(feature = "zero_init")]
         unsafe {
             core::ptr::write_bytes(block as *mut u8, 0, BLOCK_SIZE);
         }
-        // let ep = start.elapsed().as_nanos();
-        // EP.fetch_add(ep as u64, std::sync::atomic::Ordering::Relaxed);
         block
     }
 
@@ -389,14 +358,6 @@ impl GlobalAllocator {
             self.free_blocks.push(*block);
         }
     }
-
-    // pub fn gc_end(&mut self) {
-    //     let _lock = self.lock.lock();
-    //     self.free_blocks.iter().for_each(|block| {
-    //         self.mmap
-    //             .dontneed(*block as *mut Block as *mut u8, BLOCK_SIZE);
-    //     });
-    // }
 
     /// # in heap
     /// 判断一个指针是否在heap之中

@@ -8,8 +8,9 @@ use std::{
 ///
 /// The free list is mostly used when the thread local allocator
 /// try to get a new block from the global allocator, and they
-/// only return the block to the global allocator just after the GC,
-/// so we must ensure that the pop(get_block) operation is fast.
+/// only return the block to the global allocator at the beginning of
+/// the next GC mark phase. So we can avoid lock completely in
+/// pop and push operation.
 #[derive(Debug)]
 pub struct Freelist<T> {
     inner: Inner<T>,
