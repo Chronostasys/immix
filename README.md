@@ -18,7 +18,7 @@ Welcome to the Immix GC project! This project aims to provide a highly efficient
 
 - Linux amd64
 - windows amd64
-- macOS aaarch64
+- macOS aarch64
 
 The above 3 platforms are tested and supported, other platforms may work but are not officially supported.
 
@@ -43,25 +43,38 @@ Once you have the dependencies installed, you can build the Immix GC by followin
 
     don't forget to add the `--release` flag if you want to build the release version.
 
+## Some important notes
+
+Current GC's allocation fast path is implemented in raw LLVM IR, it only fallbacks to Rust allocation
+routine when 1. the allocation size is too large or 2. the current 'hole' is not large enough to hold the object.
+
+The GC algorithm **requires the allocated memory to be zeroed or initialized before next possible GC cycle**,
+this is because the reused memory may contain object headers dead in previous GC cycles, which may
+leading to finding wrong object header during collection.
+
+So if you are using the GC apart from the 'LLVM IR fast path', you should always zero or initialize the allocated memory just after allocation.
+
+By the way, the LLVM IR fast path is implemented in `alloc-*.ll` files.
+
 ## Usage
 
 ### Using Immix GC on C Programs
 
-We have some built-in LLVM passes and GC strategy plugins that you can use to integrate the Immix GC with existing C programs.
-
-[example.c](example.c) is a simple C program that playing with a binary tree, it's originally using the system malloc/free to manage memory. You can compile it with `clang example.c` and run it with `./a.out`.
-
-To use the Immix GC, you can recomplie the program running
-
-```bash
-./compile_example.sh
-```
-
-Then you can run the program with `./a.out`. The program will run with the Immix GC, and produce exactly the same result as before.
-
-### Using on your own LLVM-based language
-
 TODO
+
+## Release Notes
+
+### v0.2.0
+
+- Rewrote the allocation and collection logic to improve performance.
+- Reimplement fast allocation path in raw LLVM IR to make the allocation process as fast as possible.
+- Imporve the escape analysis to reduce the number of objects that need to be allocated on the heap.
+
+TODO: Update usage docs
+
+### v0.1.0
+
+- Initial release of the Immix GC project.
 
 ## Language using Immix GC
 
