@@ -134,7 +134,7 @@ impl GlobalAllocator {
         let should_expand = total_used > self.heap_size / 2;
         // eprintln!("total used: {}, heap size: {}", total_used, self.heap_size);
         if should_expand {
-            self.heap_size = self.heap_size * 3 / 2;
+            self.heap_size = self.heap_size * 11 / 10;
         }
 
         self.total_used

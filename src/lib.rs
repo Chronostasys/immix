@@ -538,14 +538,6 @@ const GC_AUTOCOLLECT_ENABLE: bool = false;
 unsafe impl Sync for GAWrapper {}
 
 pub fn get_gc_stw_num() -> usize {
-    eprintln!(
-        "alloc ep: {}ns",
-        EP.load(std::sync::atomic::Ordering::Relaxed)
-    );
-    eprintln!(
-        "slowpath time {}",
-        SLOW_PATH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-    );
     GC_STW_COUNT.load(Ordering::SeqCst)
 }
 
