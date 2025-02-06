@@ -373,6 +373,12 @@ pub fn register_current_thread() -> *mut Collector {
 }
 
 pub fn safepoint_fast_unwind_ex(sp: *mut u8, gc: *mut Collector) {
+    let me_sp = Collector::current_sp();
+    unsafe {
+        let gc = gc.as_mut().unwrap();
+        gc.set_low_sp(me_sp);
+        gc.store_registers();
+    }
     unsafe { gc.as_ref().unwrap() }.safepoint_fast_unwind(sp);
 }
 

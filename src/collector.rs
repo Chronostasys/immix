@@ -1393,7 +1393,7 @@ impl Collector {
                     let mut mutex = STUCK_MUTEX.lock();
                     if first {
                         first = false;
-                        startsender.send(()).unwrap();
+                        _ = startsender.send(());
                     }
                     if endreceiver.try_recv().is_ok() {
                         drop(mutex);
@@ -1413,7 +1413,8 @@ impl Collector {
                 }
             });
         }
-        startrecv.recv().unwrap();
+        // in case of exit this may return error
+        _ = startrecv.recv();
         STUCK_COND.notify_all();
         // FRAMES_LIST.0.lock().borrow_mut().insert( self as _,frames);
     }
@@ -1442,10 +1443,10 @@ impl Collector {
             return;
         }
         log::info!("gc {}: unstucking...", self.id);
-        self.stuck_stop_notify_chan.send(()).unwrap();
+        _ = self.stuck_stop_notify_chan.send(());
         STUCK_COND.notify_all();
         // wait until the shadow thread exit
-        self.stuck_stopped_notify_chan.1.recv().unwrap();
+        _ = self.stuck_stopped_notify_chan.1.recv();
 
         let old = self
             .frames_list
