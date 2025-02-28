@@ -1,6 +1,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::needless_range_loop)]
+#![allow(dead_code)]
 use std::{
     cell::UnsafeCell,
     os::raw::c_void,
