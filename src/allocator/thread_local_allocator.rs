@@ -275,7 +275,7 @@ impl ThreadLocalAllocator {
                 p
             }
             crate::AllocResult::Fail => {
-                debug_assert!(size > LINE_SIZE);
+                debug_assert!(size + 8 > LINE_SIZE);
                 // mid size object alloc failed, try to overflow_alloc
                 self.overflow_alloc(size, obj_type)
             }
