@@ -316,7 +316,10 @@ impl Block {
                                     .get_marked()
                         )
                     } else {
-                        // line.write_bytes(0, 8);
+                        // IMPORTANT: if a line is marked, we need to make sure
+                        // all header of dead objects in the line are cleared.
+                        // Otherwise, the header may break the mark logic.
+                        line.write_bytes(0, 8);
                         line = line.add(8);
                     }
                 }

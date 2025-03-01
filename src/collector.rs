@@ -216,7 +216,7 @@ impl Collector {
         }
         let ptr = self.alloc_no_collect(size, obj_type);
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if ptr.is_null() {
+        if ptr.is_null() && size != 0 {
             // spin_until!(!GC_SWEEPING.load(Ordering::Acquire));
             log::info!("gc {}: OOM, start emergency gc", self.id);
             // ENABLE_EVA.store(false, Ordering::Release);
@@ -971,14 +971,6 @@ impl Collector {
         // iterate through queue and mark all reachable objects
         unsafe {
             loop {
-                while let Some(job) = self.queue.pop() {
-                    match job {
-                        SendableMarkJob::Frame(f) => {
-                            self.mark_frame(&f.0, &f.1);
-                        }
-                        SendableMarkJob::Object((obj, obj_type)) => self.mark_obj(obj_type, obj),
-                    }
-                }
                 let mut empty_num = 0;
                 for stealer in stealers {
                     match stealer.steal_batch(&self.queue) {
@@ -987,6 +979,14 @@ impl Collector {
                             empty_num += 1;
                         }
                         Steal::Retry => {}
+                    }
+                }
+                while let Some(job) = self.queue.pop() {
+                    match job {
+                        SendableMarkJob::Frame(f) => {
+                            self.mark_frame(&f.0, &f.1);
+                        }
+                        SendableMarkJob::Object((obj, obj_type)) => self.mark_obj(obj_type, obj),
                     }
                 }
                 if empty_num == stealers.len() {
