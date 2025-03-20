@@ -206,6 +206,10 @@ impl Collector {
     ///
     /// For more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn alloc_fast_unwind(&self, size: usize, obj_type: ObjectType, sp: *mut u8) -> *mut u8 {
+        #[cfg(debug_assertions)]
+        {
+            self.thread_local_allocator().check_block_cursor();
+        }
         // let start = Instant::now();
         #[cfg(debug_assertions)]
         if !GC_SWEEPING.load(Ordering::Acquire) {
@@ -260,6 +264,10 @@ impl Collector {
         // if GC_RUNNING.load(Ordering::Acquire) {
         //     self.collect_fast_unwind(sp);
         // }
+        #[cfg(debug_assertions)]
+        {
+            self.thread_local_allocator().check_block_cursor();
+        }
         self.collect_if_needed_fast_unwind(sp);
     }
 
@@ -1241,6 +1249,11 @@ impl Collector {
         self.collect_fast_unwind(std::ptr::null_mut());
     }
 
+    #[cfg(debug_assertions)]
+    pub fn check_block_cursor(&self) {
+        self.thread_local_allocator().check_block_cursor();
+    }
+
     /// # collect_fast_unwind
     ///
     /// Collect garbage, use stack pointer to walk gc frames.
@@ -1253,6 +1266,10 @@ impl Collector {
     ///
     /// for more information, see [mark_fast_unwind](Collector::mark_fast_unwind)
     pub fn collect_fast_unwind(&self, sp: *mut u8) {
+        #[cfg(debug_assertions)]
+        {
+            self.thread_local_allocator().check_block_cursor();
+        }
         #[cfg(feature = "gc_profile")]
         eprintln!(
             "gc {} start collect at {:?}",
@@ -1309,12 +1326,20 @@ impl Collector {
             self.thread_local_allocator().set_collect_mode(true);
         }
         self.mark_fast_unwind(sp);
+        #[cfg(debug_assertions)]
+        {
+            self.thread_local_allocator().check_block_cursor();
+        }
         if SHOULD_EXIT.load(Ordering::Acquire) {
             return;
         }
         let (_used, free) = self.sweep();
         {
             self.thread_local_allocator().set_collect_mode(false);
+        }
+        #[cfg(debug_assertions)]
+        {
+            self.thread_local_allocator().check_block_cursor();
         }
         log::info!(
             "gc {} collect done, used heap size: {} bytes, freed {} bytes in this gc",

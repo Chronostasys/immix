@@ -362,6 +362,7 @@ impl Block {
             self.cursor = cursor;
             self.hole_end = hole_end.unwrap_or(self.end);
         } else {
+            debug_assert!(!self.end.is_null());
             self.cursor = self.end;
             self.hole_end = self.end;
         }
@@ -497,11 +498,12 @@ impl Block {
     }
 
     pub unsafe fn bump_next_hole(&mut self) -> Option<()> {
-        // // zero the remaining space in current hole
-        // if self.hole_end > self.cursor {
-        //     // eprintln!("zeroing {}", self.hole_end as usize - self.cursor as usize);
-        //     self.cursor.write_bytes(0, self.hole_end as usize - self.cursor as usize);
-        // }
+        // zero the remaining space in current hole
+        if self.hole_end > self.cursor {
+            // eprintln!("zeroing {}", self.hole_end as usize - self.cursor as usize);
+            self.cursor
+                .write_bytes(0, self.hole_end as usize - self.cursor as usize);
+        }
         if self.hole_end >= self.end {
             return Option::<()>::None;
         }
@@ -564,6 +566,7 @@ impl Block {
     }
 
     pub unsafe fn alloc(&mut self, req_size: usize, tp: ObjectType) -> AllocResult {
+        debug_assert!(!self.cursor.is_null());
         if self.cursor >= self.hole_end && self.bump_next_hole().is_none() {
             return AllocResult::Exhausted;
         }

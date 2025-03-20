@@ -44,6 +44,9 @@ impl DioGC {
             println!("{:?}", bt);
             exit(1);
         }
+        if !re.is_null() {
+            re.write_bytes(0, (size) as usize);
+        }
         re
     }
     pub unsafe fn add_coro_stack(sp: *mut u8, stack: *mut u8) {

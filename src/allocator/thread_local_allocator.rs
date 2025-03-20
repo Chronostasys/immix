@@ -116,6 +116,15 @@ impl ThreadLocalAllocator {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub fn check_block_cursor(&self) {
+        for block in &self.recyclable_blocks {
+            unsafe {
+                debug_assert!(!(**block).get_cursor().is_null());
+            }
+        }
+    }
+
     pub fn iter<F>(&self, mut f: F)
     where
         F: FnMut(*mut u8),
@@ -237,6 +246,10 @@ impl ThreadLocalAllocator {
 
     #[inline(always)]
     fn normal_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+        #[cfg(debug_assertions)]
+        {
+            self.check_block_cursor();
+        }
         // mid size object & small size object
         // 刚启动或者recycle block全用光了
         if self.recyclable_blocks.is_empty() {
@@ -244,6 +257,7 @@ impl ThreadLocalAllocator {
             if block.is_null() {
                 return std::ptr::null_mut();
             }
+            debug_assert!(!unsafe { (*block).get_cursor() }.is_null());
             unsafe {
                 (*block).free = false;
             }
@@ -321,6 +335,7 @@ impl ThreadLocalAllocator {
         unsafe {
             (*new_block).correct_overflow_avai_lines();
         }
+        debug_assert!(!unsafe { (*new_block).get_cursor() }.is_null());
         self.recyclable_blocks.push_back(new_block);
         // unsafe {
         //     self.curr_block = *self.recyclable_blocks.front().unwrap_unchecked();
@@ -423,6 +438,7 @@ impl ThreadLocalAllocator {
                     free_lines += delta_f;
                     let (line, _) = (*block).get_available_line_num_and_holes();
                     if line > 0 {
+                        debug_assert!(!{ (*block).get_cursor() }.is_null());
                         recyclable_blocks.push_back(block);
                     } else {
                         unavailable_blocks.push(block);
@@ -494,6 +510,7 @@ impl ThreadLocalAllocator {
                 self.curr_block.as_mut().unwrap_unchecked().free = false;
                 self.curr_block.as_mut().unwrap_unchecked().reset_header();
             }
+            debug_assert!(!unsafe { self.curr_block.as_ref().unwrap().get_cursor() }.is_null());
             self.recyclable_blocks.push_back(self.curr_block);
         } else {
             self.curr_block = unsafe { curr.unwrap_unchecked() };
