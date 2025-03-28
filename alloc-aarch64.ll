@@ -43,6 +43,8 @@ define double @sqrt_64(double %Val) {
     ret double %1
 }
 
+declare void @printi64ln(i64)
+
 ; define new DioGC__malloc
 define ptr addrspace(1) @DioGC__malloc(i64 %size, i8 %obj_type, i64 %rsp) noinline optnone allockind("alloc") {
 entry:
@@ -71,9 +73,16 @@ call_slowpath:
     %slowpath_result = call ptr addrspace(1) @DioGC__malloc_slowpath(i64 %size, i8 %obj_type, i64 %rspi, ptr @gc_handle)
     call void @llvm.memset.p1.i64(ptr addrspace(1) %slowpath_result, i8 0, i64 %alloc_size_body, i1 false)
     ; call void @printi64ln(i64 999)
-    ; %slowpath_result_i = ptrtoint ptr addrspace(1) %slowpath_result to i64
-    ; call void @printi64ln(i64 %slowpath_result_i)
+    %slowpath_result_i = ptrtoint ptr addrspace(1) %slowpath_result to i64
+    call void @printi64ln(i64 %slowpath_result_i)
+    ; check if slowpath_result is null
+    %slowpath_result_is_null = icmp eq ptr addrspace(1) %slowpath_result, null
+    br i1 %slowpath_result_is_null, label %unreachable_path, label %slowpath_result_not_null
+unreachable_path:
+    unreachable
+slowpath_result_not_null:
     ret ptr addrspace(1) %slowpath_result
+
 fastpath_start:    
     ; call void @printi64ln(i64 1)
     %thread_local_allocator_ptr = load ptr, ptr %collector_ptr, align 8
@@ -136,14 +145,17 @@ fast_path:
     ; check if new_cursor_after_alloc_i is zero
     %new_cursor_after_alloc_is_zero = icmp eq i64 %new_cursor_after_alloc_i, 0
     br i1 %new_cursor_after_alloc_is_zero, label %unreachable_path, label %update_cursor
-unreachable_path:
-    unreachable
 
 update_cursor:
     %new_cursor_after_alloc = inttoptr i64 %new_cursor_after_alloc_i to ptr addrspace(1)
     store ptr addrspace(1) %new_cursor_after_alloc, ptr addrspace(1) %cursor_ptr, align 8
+    ; checko if cursor_phi is null
+    %cursor_phi_is_null = icmp eq ptr addrspace(1) %cursor_phi, null
+    br i1 %cursor_phi_is_null, label %unreachable_path, label %update_cursor_phi
+
+update_cursor_phi:
     ; call void @printi64ln(i64 4)
-    ; call void @printi64ln(i64 %cursor_phi_i)
+    call void @printi64ln(i64 %cursor_phi_i)
     call void @llvm.memset.p1.i64(ptr addrspace(1) %cursor_phi, i8 0, i64 %alloc_size_body, i1 false)
     ret ptr addrspace(1) %cursor_phi
 }
