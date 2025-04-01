@@ -235,17 +235,17 @@ impl ThreadLocalAllocator {
     ///
     /// * `*mut u8` - object pointer
     #[inline(always)]
-    pub fn alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+    pub fn alloc(&mut self, size: usize, obj_type: ObjectType, can_fail: bool) -> *mut u8 {
         // big size object
         if size > ((BLOCK_SIZE / LINE_SIZE - 3) / 4 - 1) * LINE_SIZE {
             return self.big_obj_alloc(size, obj_type);
         }
 
-        self.normal_alloc(size, obj_type)
+        self.normal_alloc(size, obj_type, can_fail)
     }
 
     #[inline(always)]
-    fn normal_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+    fn normal_alloc(&mut self, size: usize, obj_type: ObjectType, can_fail: bool) -> *mut u8 {
         #[cfg(debug_assertions)]
         {
             self.check_block_cursor();
@@ -253,7 +253,7 @@ impl ThreadLocalAllocator {
         // mid size object & small size object
         // 刚启动或者recycle block全用光了
         if self.recyclable_blocks.is_empty() {
-            let block = self.get_new_block();
+            let block = self.get_new_block_cannot_fail();
             if block.is_null() {
                 return std::ptr::null_mut();
             }
@@ -272,7 +272,7 @@ impl ThreadLocalAllocator {
                 if let Some(ff) = ff {
                     f = ff;
                 } else {
-                    return self.normal_alloc(size, obj_type);
+                    return self.normal_alloc(size, obj_type, can_fail);
                 }
             }
         }
@@ -291,14 +291,14 @@ impl ThreadLocalAllocator {
             crate::AllocResult::Fail => {
                 debug_assert!(size + 8 > LINE_SIZE);
                 // mid size object alloc failed, try to overflow_alloc
-                self.overflow_alloc(size, obj_type)
+                self.overflow_alloc(size, obj_type, can_fail)
             }
             crate::AllocResult::Exhausted => {
                 unsafe {
                     self.unavailable_blocks
                         .push(self.recyclable_blocks.pop_front().unwrap_unchecked());
                 }
-                self.normal_alloc(size, obj_type)
+                self.normal_alloc(size, obj_type, can_fail)
             }
         }
     }
@@ -314,10 +314,10 @@ impl ThreadLocalAllocator {
     /// ## Return
     ///
     /// * `*mut u8` - object pointer
-    pub fn overflow_alloc(&mut self, size: usize, obj_type: ObjectType) -> *mut u8 {
+    pub fn overflow_alloc(&mut self, size: usize, obj_type: ObjectType, can_fail: bool) -> *mut u8 {
         // eprintln!("overflow alloc");
         // 获取新block
-        let new_block = self.get_new_block();
+        let new_block = self.get_new_block(can_fail);
         if new_block.is_null() {
             return std::ptr::null_mut();
         }
@@ -381,7 +381,10 @@ impl ThreadLocalAllocator {
     /// ## Return
     ///
     /// * `*mut Block` - block pointer
-    fn get_new_block(&mut self) -> *mut Block {
+    fn get_new_block_cannot_fail(&mut self) -> *mut Block {
+        self.get_new_block(false)
+    }
+    fn get_new_block(&mut self, can_fail: bool) -> *mut Block {
         let b = if self.collect_mode && !self.eva_blocks.is_empty() {
             self.eva_blocks.pop().unwrap()
         } else if let Some(b) = self.blocks_to_return.pop() {
@@ -389,7 +392,7 @@ impl ThreadLocalAllocator {
         } else if self.collect_mode {
             unsafe { (*self.global_allocator).get_block_locked() }
         } else {
-            unsafe { (*self.global_allocator).get_block(true) }
+            unsafe { (*self.global_allocator).get_block(can_fail) }
         };
 
         unsafe {
@@ -502,7 +505,7 @@ impl ThreadLocalAllocator {
             self.curr_block = self
                 .blocks_to_return
                 .pop()
-                .unwrap_or_else(|| self.get_new_block());
+                .unwrap_or_else(|| self.get_new_block_cannot_fail());
             if self.curr_block.is_null() {
                 panic!("OOM! GC does not free enough memory!");
             }

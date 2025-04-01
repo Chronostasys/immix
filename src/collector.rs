@@ -226,7 +226,11 @@ impl Collector {
             // ENABLE_EVA.store(false, Ordering::Release);
             self.collect_fast_unwind(sp);
             // ENABLE_EVA.store(true, Ordering::Release);
-            return self.thread_local_allocator().alloc(size, obj_type);
+            let re = self.thread_local_allocator().alloc(size, obj_type, false);
+            if re.is_null() {
+                panic!("GC OOM!")
+            }
+            return re;
         }
         // crate::EP.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         ptr
@@ -280,7 +284,7 @@ impl Collector {
             return std::ptr::null_mut();
         }
         log::info!("gc {}: alloc {} bytes", self.id, size);
-        let ptr = self.thread_local_allocator().alloc(size, obj_type);
+        let ptr = self.thread_local_allocator().alloc(size, obj_type, true);
         ptr
     }
 
@@ -429,9 +433,9 @@ impl Collector {
         let ptr = *(ptr as *mut *mut u8);
         // eprintln!("mark ptr {:p} -> {:p}", father, ptr);
         // mark it if it is in heap
-        if (ptr as usize) % 8 != 0 {
-            return;
-        }
+        // if (ptr as usize) % 8 != 0 {
+        //     return;
+        // }
         if self.thread_local_allocator().in_heap(ptr) && ptr as usize % BLOCK_SIZE > LINE_SIZE * 3 {
             // IMPORTANT: when the stack marking is conservative, the uninitialized
             // stack space may contain some heap pointers that are previously

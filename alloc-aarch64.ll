@@ -74,7 +74,7 @@ call_slowpath:
     call void @llvm.memset.p1.i64(ptr addrspace(1) %slowpath_result, i8 0, i64 %alloc_size_body, i1 false)
     ; call void @printi64ln(i64 999)
     %slowpath_result_i = ptrtoint ptr addrspace(1) %slowpath_result to i64
-    call void @printi64ln(i64 %slowpath_result_i)
+    ; call void @printi64ln(i64 %slowpath_result_i)
     ; check if slowpath_result is null
     %slowpath_result_is_null = icmp eq ptr addrspace(1) %slowpath_result, null
     br i1 %slowpath_result_is_null, label %unreachable_path, label %slowpath_result_not_null
@@ -155,7 +155,7 @@ update_cursor:
 
 update_cursor_phi:
     ; call void @printi64ln(i64 4)
-    call void @printi64ln(i64 %cursor_phi_i)
+    ; call void @printi64ln(i64 %cursor_phi_i)
     call void @llvm.memset.p1.i64(ptr addrspace(1) %cursor_phi, i8 0, i64 %alloc_size_body, i1 false)
     ret ptr addrspace(1) %cursor_phi
 }
